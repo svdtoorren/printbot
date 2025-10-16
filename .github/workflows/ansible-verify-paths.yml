@@ -1,0 +1,27 @@
+name: ansible-verify-paths
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ansible>=9,<11"
+
+      - name: Run verify_paths playbook (controller-only)
+        run: |
+          ansible-playbook ansible/verify_paths.yml --syntax-check
+          ansible-playbook ansible/verify_paths.yml

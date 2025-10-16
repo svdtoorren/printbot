@@ -1,0 +1,50 @@
+---
+# PRE-FLIGHT: valideer lokale bronpaden op de controller
+- name: Set repo_root fact
+  set_fact:
+    repo_root: "{{ playbook_dir }}/.."
+
+- name: Stat repo paths (controller)
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+    - name: Stat printbot package dir
+      stat:
+        path: "{{ repo_root }}/src/printbot"
+      register: st_pkg
+
+    - name: Stat requirements.txt
+      stat:
+        path: "{{ repo_root }}/requirements.txt"
+      register: st_req
+
+    - name: Stat systemd unit
+      stat:
+        path: "{{ repo_root }}/systemd/printbot.service"
+      register: st_unit
+
+    - name: Stat .env file
+      stat:
+        path: "{{ repo_root }}/.env"
+      register: st_env
+
+    - name: Assert required paths exist and are correct
+      assert:
+        that:
+          - st_pkg.stat.exists
+          - st_pkg.stat.isdir
+          - st_req.stat.exists
+          - not st_req.stat.isdir
+          - st_unit.stat.exists
+          - not st_unit.stat.isdir
+          - st_env.stat.exists
+          - not st_env.stat.isdir
+        fail_msg: >
+          One or more required source paths are missing or invalid.
+          Expected:
+            {{ repo_root }}/src/printbot/ (dir),
+            {{ repo_root }}/requirements.txt (file),
+            {{ repo_root }}/systemd/printbot.service (file),
+            {{ repo_root }}/.env (file)
+        success_msg: "Source path preflight OK"
