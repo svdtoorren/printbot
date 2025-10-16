@@ -1,0 +1,66 @@
+- name: Ensure printbot user and group
+  user:
+    name: printbot
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+
+- name: Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: printbot
+    group: printbot
+    mode: "0755"
+  loop:
+    - /opt/printbot
+    - /var/lib/printbot
+
+- name: Copy application files
+  copy:
+    src: "{{ playbook_dir }}/../.."
+    dest: /opt/printbot
+    owner: printbot
+    group: printbot
+  notify: Restart printbot
+
+- name: Install Python venv
+  apt:
+    name:
+      - python3-venv
+      - python3-pip
+      - build-essential
+    state: present
+    update_cache: yes
+
+- name: Create venv
+  command: python3 -m venv /opt/printbot/.venv
+  args:
+    creates: /opt/printbot/.venv/bin/python
+
+- name: Install requirements
+  command: /opt/printbot/.venv/bin/pip install -r /opt/printbot/requirements.txt
+
+- name: Deploy environment file
+  template:
+    src: env.j2
+    dest: /opt/printbot/.env
+    owner: printbot
+    group: printbot
+    mode: "0640"
+  notify: Restart printbot
+
+- name: Deploy systemd unit
+  copy:
+    src: "{{ playbook_dir }}/../../systemd/printbot.service"
+    dest: /etc/systemd/system/printbot.service
+    mode: "0644"
+  notify:
+    - Daemon reload
+    - Restart printbot
+
+- name: Enable and start service
+  systemd:
+    name: printbot
+    state: started
+    enabled: yes

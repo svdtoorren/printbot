@@ -1,0 +1,18 @@
+- name: Install CUPS and helpers
+  apt:
+    name:
+      - cups
+      - avahi-daemon
+      - ipp-usb
+    state: present
+    update_cache: yes
+
+- name: Enable and start CUPS
+  systemd:
+    name: cups
+    state: started
+    enabled: yes
+
+- name: Allow remote admin (optional)
+  command: cupsctl --remote-admin --remote-any --share-printers
+  changed_when: false

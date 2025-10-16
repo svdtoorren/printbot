@@ -1,0 +1,22 @@
+[Unit]
+Description=PrintBot - Auto print Exchange Online orders
+After=network-online.target cups.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=printbot
+Group=printbot
+WorkingDirectory=/opt/printbot
+EnvironmentFile=/opt/printbot/.env
+ExecStart=/opt/printbot/.venv/bin/python -m printbot.main
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

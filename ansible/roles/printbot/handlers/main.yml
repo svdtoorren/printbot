@@ -1,0 +1,8 @@
+- name: Daemon reload
+  systemd:
+    daemon_reload: yes
+
+- name: Restart printbot
+  systemd:
+    name: printbot
+    state: restarted
