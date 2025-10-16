@@ -1,11 +1,14 @@
+---
+# USER & DIRECTORIES
 - name: Ensure printbot user and group
   user:
     name: printbot
     system: yes
     create_home: no
     shell: /usr/sbin/nologin
+  become: yes
 
-- name: Create directories
+- name: Create base directories
   file:
     path: "{{ item }}"
     state: directory
@@ -15,16 +18,51 @@
   loop:
     - /opt/printbot
     - /var/lib/printbot
+  become: yes
 
-- name: Copy application files
-  copy:
-    src: "{{ playbook_dir }}/../.."
-    dest: /opt/printbot
+# PRE-FLIGHT
+- name: Include path preflight
+  include_tasks: preflight.yml
+
+# CLEAN
+- name: Clean /opt/printbot (remove app tree; keep state in /var/lib/printbot)
+  file:
+    path: /opt/printbot
+    state: absent
+  become: yes
+
+- name: Recreate /opt/printbot
+  file:
+    path: /opt/printbot
+    state: directory
     owner: printbot
     group: printbot
-  notify: Restart printbot
+    mode: "0755"
+  become: yes
 
-- name: Install Python venv
+# COPY (minimal set)
+- name: Copy Python package (src/printbot/)
+  copy:
+    src: "{{ playbook_dir }}/../src/printbot/"
+    dest: /opt/printbot/printbot/
+    owner: printbot
+    group: printbot
+    mode: "0644"
+  notify: Restart printbot
+  become: yes
+
+- name: Copy requirements.txt
+  copy:
+    src: "{{ playbook_dir }}/../requirements.txt"
+    dest: /opt/printbot/requirements.txt
+    owner: printbot
+    group: printbot
+    mode: "0644"
+  notify: Restart printbot
+  become: yes
+
+# PYTHON RUNTIME
+- name: Install Python venv deps
   apt:
     name:
       - python3-venv
@@ -32,35 +70,46 @@
       - build-essential
     state: present
     update_cache: yes
+  become: yes
 
 - name: Create venv
   command: python3 -m venv /opt/printbot/.venv
   args:
     creates: /opt/printbot/.venv/bin/python
+  become: yes
 
 - name: Install requirements
   command: /opt/printbot/.venv/bin/pip install -r /opt/printbot/requirements.txt
+  args:
+    chdir: /opt/printbot
+  become: yes
+  notify: Restart printbot
 
+# CONFIG
 - name: Deploy environment file
-  template:
-    src: env.j2
+  copy:
+    src: "{{ playbook_dir }}/../.env"
     dest: /opt/printbot/.env
     owner: printbot
     group: printbot
     mode: "0640"
   notify: Restart printbot
+  become: yes
 
+# SYSTEMD (let op: correct pad vanaf playbook_dir!)
 - name: Deploy systemd unit
   copy:
-    src: "{{ playbook_dir }}/../../systemd/printbot.service"
+    src: "{{ playbook_dir }}/../systemd/printbot.service"
     dest: /etc/systemd/system/printbot.service
     mode: "0644"
   notify:
     - Daemon reload
     - Restart printbot
+  become: yes
 
 - name: Enable and start service
   systemd:
     name: printbot
     state: started
     enabled: yes
+  become: yes
