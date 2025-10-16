@@ -53,10 +53,32 @@ class GraphClient:
         return r.json()['id']
 
     def list_unread_from(self, mailbox_upn: str, folder_id: str, sender: str, top: int = 10) -> List[Dict[str,Any]]:
-        filt = f"from/emailAddress/address eq '{sender}' and isRead eq false"
-        url = f"{GRAPH_BASE}/users/{mailbox_upn}/mailFolders/{folder_id}/messages?$filter={filt}&$orderby=receivedDateTime&$top={top}"
-        r = requests.get(url, headers=self._headers(), timeout=30)
-        r.raise_for_status()
+        url = f"{GRAPH_BASE}/users/{mailbox_upn}/mailFolders/{folder_id}/messages"
+
+        # Build filter: sender + unread
+        if sender:
+            filter_str = f"from/emailAddress/address eq '{sender}' and isRead eq false"
+        else:
+            filter_str = "isRead eq false"
+
+        # Note: $orderby removed due to "InefficientFilter" error on shared mailboxes
+        # Messages are returned in default order (usually receivedDateTime desc)
+        params = {
+            '$filter': filter_str,
+            '$top': top
+        }
+        r = requests.get(url, headers=self._headers(), params=params, timeout=30)
+
+        try:
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as ex:
+            # Include response body in error for debugging
+            try:
+                error_detail = r.json()
+                raise RuntimeError(f"Graph API error: {ex}, Response: {error_detail}") from ex
+            except:
+                raise RuntimeError(f"Graph API error: {ex}, Status: {r.status_code}, Body: {r.text[:500]}") from ex
+
         return r.json().get('value', [])
 
     def mark_read(self, mailbox_upn: str, message_id: str) -> None:

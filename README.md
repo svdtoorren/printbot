@@ -439,7 +439,7 @@ MIT License - zie LICENSE bestand voor details
 
 ## 🙋 Support & bijdragen
 
-- **Issues**: https://github.com/yourusername/printbot/issues
+- **Issues**: https://github.com/svdtoorren/printbot/issues
 - **Pull requests**: Altijd welkom!
 - **Documentatie**: Suggesties welkom via issues
 

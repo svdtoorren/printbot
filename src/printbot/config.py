@@ -1,5 +1,22 @@
 import os
+from pathlib import Path
 from dataclasses import dataclass
+
+# Load .env file if it exists (for local development and systemd EnvironmentFile)
+try:
+    from dotenv import load_dotenv
+    # Try to load from common locations
+    env_paths = [
+        Path(".env"),  # Current directory
+        Path(__file__).parent.parent.parent / ".env",  # Repository root
+        Path("/opt/printbot/.env"),  # Production location
+    ]
+    for env_path in env_paths:
+        if env_path.exists():
+            load_dotenv(env_path)
+            break
+except ImportError:
+    pass  # python-dotenv not installed, rely on environment variables
 
 @dataclass
 class Settings:
