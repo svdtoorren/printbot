@@ -14,6 +14,14 @@ def html_to_text(html: str) -> str:
         return html
 
 def print_text(printer_name: str, title: str, content: str) -> None:
+    """Print text to CUPS printer, or simulate if DRY_RUN=true."""
+    dry_run = os.getenv('DRY_RUN', '').lower() in ('true', '1', 'yes')
+
+    if dry_run:
+        print(f"[DRY_RUN] Would print to '{printer_name}': {title}")
+        print(f"[DRY_RUN] Content preview (first 100 chars): {content[:100]}...")
+        return
+
     if not content.endswith('\n'):
         content = content + '\n'
     fd, path = tempfile.mkstemp(prefix="printbot_", suffix=".txt")

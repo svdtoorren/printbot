@@ -85,3 +85,26 @@ class GraphClient:
         url = f"{GRAPH_BASE}/users/{mailbox_upn}/messages/{message_id}"
         r = requests.patch(url, headers=self._headers(), json={"isRead": True}, timeout=30)
         r.raise_for_status()
+
+    def get_or_create_subfolder(self, mailbox_upn: str, parent_folder_id: str, folder_name: str) -> str:
+        """Get existing subfolder ID or create it if it doesn't exist."""
+        # Try to find existing subfolder
+        url = f"{GRAPH_BASE}/users/{mailbox_upn}/mailFolders/{parent_folder_id}/childFolders"
+        params = {'$filter': f"displayName eq '{folder_name}'"}
+        r = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        r.raise_for_status()
+
+        folders = r.json().get('value', [])
+        if folders:
+            return folders[0]['id']
+
+        # Create new subfolder
+        r = requests.post(url, headers=self._headers(), json={"displayName": folder_name}, timeout=30)
+        r.raise_for_status()
+        return r.json()['id']
+
+    def move_message(self, mailbox_upn: str, message_id: str, destination_folder_id: str) -> None:
+        """Move a message to a different folder."""
+        url = f"{GRAPH_BASE}/users/{mailbox_upn}/messages/{message_id}/move"
+        r = requests.post(url, headers=self._headers(), json={"destinationId": destination_folder_id}, timeout=30)
+        r.raise_for_status()
