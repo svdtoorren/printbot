@@ -27,8 +27,9 @@
       stat:
         path: "{{ repo_root }}/.env"
       register: st_env
+      when: not (ci_mode | default(false) | bool)
 
-    - name: Assert source paths are present and valid
+    - name: Assert source paths are present and valid (including .env)
       assert:
         that:
           - st_pkg.stat.exists and st_pkg.stat.isdir
@@ -43,3 +44,20 @@
             {{ repo_root }}/systemd/printbot.service (file),
             {{ repo_root }}/.env (file)
         success_msg: "All source paths validated successfully"
+      when: not (ci_mode | default(false) | bool)
+
+    - name: Assert source paths are present and valid (CI mode - without .env)
+      assert:
+        that:
+          - st_pkg.stat.exists and st_pkg.stat.isdir
+          - st_req.stat.exists and not st_req.stat.isdir
+          - st_unit.stat.exists and not st_unit.stat.isdir
+        fail_msg: >
+          One or more required source paths are missing or invalid.
+          Expected:
+            {{ repo_root }}/src/printbot/ (dir),
+            {{ repo_root }}/requirements.txt (file),
+            {{ repo_root }}/systemd/printbot.service (file)
+          Note: .env check is skipped in CI mode
+        success_msg: "All source paths validated successfully (CI mode)"
+      when: ci_mode | default(false) | bool

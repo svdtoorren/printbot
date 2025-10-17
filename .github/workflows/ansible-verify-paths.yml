@@ -21,7 +21,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install "ansible>=9,<11"
 
-      - name: Run verify_paths playbook (controller-only)
+      - name: Run verify_paths playbook (CI mode - skip .env check)
         run: |
           ansible-playbook ansible/verify_paths.yml --syntax-check
-          ansible-playbook ansible/verify_paths.yml
+          ansible-playbook ansible/verify_paths.yml -e "ci_mode=true"
