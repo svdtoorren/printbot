@@ -16,3 +16,7 @@
 - name: Allow remote admin (optional)
   command: cupsctl --remote-admin --remote-any --share-printers
   changed_when: false
+
+- name: Set default print options (disable duplex)
+  command: lpoptions -p mp-brother -o sides=one-sided -o media=A4
+  become: yes
