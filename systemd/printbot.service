@@ -9,9 +9,12 @@ User=printbot
 Group=printbot
 WorkingDirectory=/opt/printbot
 EnvironmentFile=/opt/printbot/.env
-ExecStart=/opt/printbot/.venv/bin/python -m printbot.main
+ExecStart=/opt/printbot/.venv/bin/python -u -m printbot.main
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=printbot
 
 NoNewPrivileges=true
 PrivateTmp=true

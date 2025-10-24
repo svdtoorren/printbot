@@ -43,13 +43,21 @@ class Processor:
         finally:
             con.close()
 
-    def handle_message(self, msg: Dict[str,Any]):
+    def handle_message(self, msg: Dict[str,Any]) -> str:
+        """
+        Process a message and send to printer.
+        Returns the internet message ID if successful, None otherwise.
+        Does NOT mark as printed - caller must do that after moving the message.
+        """
         imid = msg.get('internetMessageId') or msg.get('id')
         if not imid:
-            return
+            print("[Processor] Skipping message without ID")
+            return None
         if self.already_printed(imid):
-            return
+            print(f"[Processor] Message already printed: {msg.get('subject', 'no subject')}")
+            return None
         subject = msg.get('subject') or 'Order'
+        print(f"[Processor] Processing message: {subject}")
         body = msg.get('body') or {}
         ctype = body.get('contentType','text')
         content = body.get('content','') or (msg.get('bodyPreview') or '')
@@ -59,5 +67,7 @@ class Processor:
         if not content:
             content = f"(No content)\nSubject: {subject}\nFrom: {msg.get('from',{}).get('emailAddress',{}).get('address','')}\n"
         title = f"{subject} — {msg.get('receivedDateTime','')}"
+        print(f"[Processor] Sending to printer: {self.printer_name}")
         print_text(self.printer_name, title, content)
-        self.mark_printed(imid)
+        print(f"[Processor] Print job sent successfully for: {subject}")
+        return imid

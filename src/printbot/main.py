@@ -22,10 +22,17 @@ def main():
             msgs = client.list_unread_from(s.mailbox_upn, folder_id, s.filter_sender, top=10)
             for m in msgs:
                 try:
-                    proc.handle_message(m)
-                    # Move to "Printed" subfolder instead of just marking as read
-                    client.move_message(s.mailbox_upn, m['id'], printed_folder_id)
-                    print(f"[PrintBot] ✓ Printed and moved: {m.get('subject', 'no subject')}")
+                    # Process message and get the message ID if successful
+                    imid = proc.handle_message(m)
+                    if imid:
+                        # Only move and mark as printed if processing was successful
+                        client.move_message(s.mailbox_upn, m['id'], printed_folder_id)
+                        print(f"[PrintBot] Moved to Printed folder: {m.get('subject', 'no subject')}")
+                        # Mark as printed AFTER successful move to prevent race condition
+                        proc.mark_printed(imid)
+                        print(f"[PrintBot] ✓ Completed: {m.get('subject', 'no subject')}")
+                    else:
+                        print(f"[PrintBot] Skipped (already processed or invalid): {m.get('subject', 'no subject')}")
                 except Exception as ex:
                     print("[PrintBot] Error processing message:", ex, file=sys.stderr)
                     traceback.print_exc()
