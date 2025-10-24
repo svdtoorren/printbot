@@ -31,6 +31,11 @@ class Settings:
     state_dir: str = os.getenv("STATE_DIR", "/var/lib/printbot")
 
     def validate(self):
-        missing = [k for k,v in self.__dict__.items() if isinstance(v,str) and not v]
+        # List of optional fields that can be empty
+        optional_fields = {'filter_sender'}
+
+        # Check required string fields (exclude optional ones)
+        missing = [k for k,v in self.__dict__.items()
+                   if isinstance(v,str) and not v and k not in optional_fields]
         if missing:
             raise ValueError(f"Missing required settings: {', '.join(missing)}")
