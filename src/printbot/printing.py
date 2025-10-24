@@ -29,7 +29,7 @@ def print_text(printer_name: str, title: str, content: str) -> None:
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(content)
-        cmd = f"lp -d {shlex.quote(printer_name)} -o media=A4 -t {shlex.quote(title)} {shlex.quote(path)}"
+        cmd = f"lp -d {shlex.quote(printer_name)} -o media=A4 -o orientation-requested=3 -t {shlex.quote(title)} {shlex.quote(path)}"
         print(f"[Printing] Sending print job to CUPS: {title}")
         print(f"[Printing] Command: {cmd}")
 
