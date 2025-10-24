@@ -7,6 +7,18 @@
     state: present
     update_cache: yes
 
+- name: Install WeasyPrint system dependencies
+  apt:
+    name:
+      - libpango-1.0-0
+      - libpangocairo-1.0-0
+      - libgdk-pixbuf2.0-0
+      - libffi-dev
+      - shared-mime-info
+      - libcairo2
+      - libpangoft2-1.0-0
+    state: present
+
 - name: Enable and start CUPS
   systemd:
     name: cups

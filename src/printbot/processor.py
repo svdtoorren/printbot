@@ -1,6 +1,6 @@
 import os, sqlite3
 from typing import Dict, Any
-from .printing import print_text, html_to_text
+from .printing import print_pdf, html_to_pdf, text_to_pdf
 
 DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS printed (
@@ -58,16 +58,33 @@ class Processor:
             return None
         subject = msg.get('subject') or 'Order'
         print(f"[Processor] Processing message: {subject}")
+
+        # Get email body
         body = msg.get('body') or {}
-        ctype = body.get('contentType','text')
+        ctype = body.get('contentType','text').lower()
         content = body.get('content','') or (msg.get('bodyPreview') or '')
-        if ctype.lower() == 'html':
-            content = html_to_text(content)
-        content = content.strip()
-        if not content:
+
+        if not content.strip():
             content = f"(No content)\nSubject: {subject}\nFrom: {msg.get('from',{}).get('emailAddress',{}).get('address','')}\n"
+            ctype = 'text'
+
         title = f"{subject} — {msg.get('receivedDateTime','')}"
-        print(f"[Processor] Sending to printer: {self.printer_name}")
-        print_text(self.printer_name, title, content)
-        print(f"[Processor] Print job sent successfully for: {subject}")
-        return imid
+        print(f"[Processor] Content type: {ctype}")
+        print(f"[Processor] Converting to PDF and sending to printer: {self.printer_name}")
+
+        # Convert to PDF based on content type
+        try:
+            if ctype == 'html':
+                pdf_path = html_to_pdf(content, title)
+                print(f"[Processor] HTML converted to PDF: {pdf_path}")
+            else:
+                pdf_path = text_to_pdf(content, title)
+                print(f"[Processor] Text converted to PDF: {pdf_path}")
+
+            # Print the PDF
+            print_pdf(self.printer_name, title, pdf_path, cleanup=True)
+            print(f"[Processor] Print job sent successfully for: {subject}")
+            return imid
+        except Exception as e:
+            print(f"[Processor] ERROR: Failed to process message: {e}")
+            raise
