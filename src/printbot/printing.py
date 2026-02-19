@@ -37,7 +37,7 @@ def html_to_pdf(html_content: str, title: str = "Email") -> str:
             }}
             h1, h2, h3 {{ color: #333; }}
             table {{ border-collapse: collapse; width: 100%; }}
-            table, th, td {{ border: 1px solid #ddd; padding: 8px; }}
+            table, th, td {{ border: none; padding: 8px; }}
             a {{ color: #0066cc; text-decoration: underline; }}
             img {{ max-width: 100%; height: auto; }}
             pre {{ background: #f5f5f5; padding: 10px; overflow-x: auto; }}
