@@ -1,11 +1,9 @@
 - hosts: printpi
   become: yes
   vars:
-    TENANT_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    CLIENT_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    CLIENT_SECRET: "CHANGEME"
-    MAILBOX_UPN: "orders@yourdomain.tld"
-    FILTER_SENDER: "orders@bestelsite.tld"
+    GATEWAY_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    API_KEY: "pgw_CHANGEME"
+    WS_URL: "wss://printgateway.toorren.nl/ws/gateway"
     PRINTER_NAME: "PRINTERNAAM"
   roles:
     - cups

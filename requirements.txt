@@ -1,6 +1,4 @@
-msal==1.30.0
-requests==2.32.3
-tenacity==9.0.0
-beautifulsoup4==4.12.3
+websockets>=13.0
 python-dotenv==1.0.0
-weasyprint==62.3
+requests==2.32.3
+tenacity>=9.0.0

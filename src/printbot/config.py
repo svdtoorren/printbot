@@ -5,37 +5,39 @@ from dataclasses import dataclass
 # Load .env file if it exists (for local development and systemd EnvironmentFile)
 try:
     from dotenv import load_dotenv
-    # Try to load from common locations
     env_paths = [
-        Path(".env"),  # Current directory
-        Path(__file__).parent.parent.parent / ".env",  # Repository root
-        Path("/opt/printbot/.env"),  # Production location
+        Path(".env"),
+        Path(__file__).parent.parent.parent / ".env",
+        Path("/opt/printbot/.env"),
     ]
     for env_path in env_paths:
         if env_path.exists():
             load_dotenv(env_path)
             break
 except ImportError:
-    pass  # python-dotenv not installed, rely on environment variables
+    pass
+
 
 @dataclass
 class Settings:
-    tenant_id: str = os.getenv("TENANT_ID", "")
-    client_id: str = os.getenv("CLIENT_ID", "")
-    client_secret: str = os.getenv("CLIENT_SECRET", "")
-    mailbox_upn: str = os.getenv("MAILBOX_UPN", "")
-    mail_folder: str = os.getenv("MAIL_FOLDER", "PrintOrders")
-    filter_sender: str = os.getenv("FILTER_SENDER", "")
+    gateway_id: str = os.getenv("GATEWAY_ID", "")
+    api_key: str = os.getenv("API_KEY", "")
+    ws_url: str = os.getenv("WS_URL", "wss://printgateway.toorren.nl/ws/gateway")
     printer_name: str = os.getenv("PRINTER_NAME", "")
-    poll_seconds: int = int(os.getenv("POLL_SECONDS", "60"))
     state_dir: str = os.getenv("STATE_DIR", "/var/lib/printbot")
+    heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+    reconnect_delay: int = int(os.getenv("RECONNECT_DELAY", "5"))
+    max_reconnect_delay: int = int(os.getenv("MAX_RECONNECT_DELAY", "300"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    dry_run: bool = os.getenv("DRY_RUN", "").lower() in ("true", "1", "yes")
 
     def validate(self):
-        # List of optional fields that can be empty
-        optional_fields = {'filter_sender'}
-
-        # Check required string fields (exclude optional ones)
-        missing = [k for k,v in self.__dict__.items()
-                   if isinstance(v,str) and not v and k not in optional_fields]
+        required = {
+            "gateway_id": self.gateway_id,
+            "api_key": self.api_key,
+            "ws_url": self.ws_url,
+            "printer_name": self.printer_name,
+        }
+        missing = [k for k, v in required.items() if not v]
         if missing:
             raise ValueError(f"Missing required settings: {', '.join(missing)}")
