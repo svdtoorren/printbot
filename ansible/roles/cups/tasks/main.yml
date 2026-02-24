@@ -18,5 +18,5 @@
   changed_when: false
 
 - name: Set default print options (disable duplex)
-  command: lpoptions -p mp-brother -o sides=one-sided -o media=A4
+  command: lpoptions -p {{ PRINTER_NAME }} -o sides=one-sided -o media=A4
   become: yes

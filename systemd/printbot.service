@@ -1,5 +1,5 @@
 [Unit]
-Description=PrintBot - Auto print Exchange Online orders
+Description=PrintBot - WebSocket print gateway client
 After=network-online.target cups.service
 Wants=network-online.target
 

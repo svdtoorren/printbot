@@ -67,7 +67,6 @@
     name:
       - python3-venv
       - python3-pip
-      - build-essential
     state: present
     update_cache: yes
   become: yes
@@ -87,8 +86,8 @@
 
 # CONFIG
 - name: Deploy environment file
-  copy:
-    src: "{{ playbook_dir }}/../.env"
+  template:
+    src: env.j2
     dest: /opt/printbot/.env
     owner: printbot
     group: printbot
