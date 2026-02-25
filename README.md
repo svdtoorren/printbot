@@ -80,15 +80,30 @@ LOG_LEVEL=INFO                     # DEBUG, INFO, WARNING, ERROR
 
 ### Stap 3: Printer configureren in CUPS
 
-```bash
-# List beschikbare printers
-lpstat -p
+#### USB printer
 
-# Test printer
-echo "Test print" | lp -d <printer-name>
+USB printers worden meestal automatisch herkend. Controleer met `lpstat -p`.
+
+#### Netwerkprinter (IPP/AirPrint)
+
+```bash
+# Ontdek printers op het netwerk via Avahi/mDNS
+avahi-browse -rt _ipp._tcp
+
+# Voeg de printer toe via CUPS (voorbeeld: HP LaserJet via IPP)
+sudo lpadmin -p MijnPrinter \
+  -E \
+  -v ipp://192.168.1.50/ipp/print \
+  -m everywhere
+
+# Stel A4 en enkelzijdig in als default
+sudo lpoptions -p MijnPrinter -o media=A4 -o sides=one-sided
+
+# Test
+echo "Test print" | lp -d MijnPrinter
 ```
 
-Of configureer via de CUPS web interface: `http://<pi-ip>:631`
+Gebruik de CUPS web-interface op `http://<pi-ip>:631` als alternatief.
 
 ### Stap 4: Deployen naar de Pi
 
@@ -199,6 +214,43 @@ ansible-playbook -i ansible/inventory.ini ansible/site.yml
 ```
 
 De deployment behoudt je `.env` configuratie, herstart de service, en herinstalleert dependencies indien nodig.
+
+## Extra gateway toevoegen
+
+Instructies voor het toevoegen van een 2e of 3e Pi aan een bestaand deployment.
+
+1. Registreer een nieuwe gateway op de server:
+
+```bash
+curl -X POST https://printgateway.toorren.nl/api/v1/gateways \
+  -H "Authorization: Bearer <admin-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Nieuwe Printer", "organization": "my-org"}'
+```
+
+Noteer de `id` en `api_key` uit de response.
+
+2. Maak een nieuw host vars bestand:
+
+```bash
+cp ansible/host_vars/printgw-01.yml ansible/host_vars/printgw-02.yml
+```
+
+Vul `GATEWAY_ID`, `API_KEY`, en `PRINTER_NAME` in met de waarden uit stap 1.
+
+3. Voeg de nieuwe Pi toe aan `ansible/inventory.ini`:
+
+```ini
+[printgateways]
+printgw-01 ansible_host=172.16.18.203 ansible_user=printadmin
+printgw-02 ansible_host=192.168.1.101 ansible_user=printadmin
+```
+
+4. Deploy alleen de nieuwe gateway:
+
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/site.yml --limit printgw-02
+```
 
 ## Troubleshooting
 
