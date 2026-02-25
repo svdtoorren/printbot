@@ -10,6 +10,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def restart_service() -> None:
+    """Restart the printbot systemd service."""
+    logger.info("Restarting printbot service")
+    subprocess.run(["sudo", "systemctl", "restart", "printbot"], check=True, timeout=30)
+
+
 def perform_ota_update(url: str, checksum: str, version: str) -> None:
     """Download, verify, extract, and install an OTA update.
 
@@ -61,10 +67,6 @@ def perform_ota_update(url: str, checksum: str, version: str) -> None:
             ["/opt/printbot/.venv/bin/pip", "install", "-r", f"{install_dir}/requirements.txt"],
             check=True, capture_output=True, timeout=120,
         )
-
-        # Restart service
-        logger.info("Restarting printbot service")
-        subprocess.run(["sudo", "systemctl", "restart", "printbot"], check=True, timeout=30)
 
     finally:
         try:

@@ -8,6 +8,7 @@ import websockets
 
 from .config import Settings
 from .job_handler import handle_print_job
+from .ota_updater import perform_ota_update, restart_service
 from .printing import get_printer_status
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class GatewayClient:
         self._job_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
         self._start_time = time.monotonic()
+        self._ota_in_progress: bool = False
 
     async def run(self):
         """Main run loop with auto-reconnect."""
@@ -96,11 +98,40 @@ class GatewayClient:
             logger.info("Config update received: %s", msg.get("printer_config", {}))
 
         elif msg_type == "ota_update":
-            logger.info("OTA update available: v%s", msg.get("version", "?"))
-            # TODO: implement OTA update handler
+            url = msg.get("url", "")
+            checksum = msg.get("checksum", "")
+            version = msg.get("version", "?")
+            logger.info("OTA update available: v%s", version)
+            asyncio.create_task(self._handle_ota_update(url, checksum, version))
 
         else:
             logger.warning("Unknown message type: %s", msg_type)
+
+    async def _handle_ota_update(self, url: str, checksum: str, version: str):
+        """Download and install an OTA update, reporting status to the server."""
+        if self._ota_in_progress:
+            logger.warning("OTA update already in progress, ignoring")
+            return
+
+        self._ota_in_progress = True
+        try:
+            await self._send_ota_status(version, "downloading")
+            await asyncio.to_thread(perform_ota_update, url, checksum, version)
+            await self._send_ota_status(version, "completed")
+            logger.info("OTA update to v%s completed, restarting service", version)
+            await asyncio.to_thread(restart_service)
+        except Exception as e:
+            logger.exception("OTA update to v%s failed: %s", version, e)
+            await self._send_ota_status(version, "failed", str(e))
+        finally:
+            self._ota_in_progress = False
+
+    async def _send_ota_status(self, version: str, status: str, error: str | None = None):
+        """Send OTA status update to server."""
+        msg = {"type": "ota_status", "version": version, "status": status}
+        if error:
+            msg["error"] = error
+        await self._send(msg)
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats."""
