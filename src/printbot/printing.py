@@ -72,30 +72,14 @@ def print_pdf(
                 pass
 
 
-def discover_devices(timeout: int = 10) -> list[dict]:
-    """Discover available CUPS devices using lpinfo.
-
-    Returns a list of dicts with keys: uri, make_model, info.
-    """
+def _parse_lpinfo_output(stdout: str) -> list[dict]:
+    """Parse lpinfo -l -v output into a list of device dicts."""
     FILTERED_SCHEMES = {"cups-brf", "implicitclass"}
-
-    try:
-        result = subprocess.run(
-            ["lpinfo", "-l", "-v"],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("CUPS is not installed (lpinfo not found)")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Device discovery timed out after {timeout}s")
-
-    if result.returncode != 0:
-        raise RuntimeError(f"lpinfo failed (exit {result.returncode}): {result.stderr.strip()}")
 
     devices = []
     current: Optional[dict] = None
 
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if line.startswith("Device:"):
             # Flush previous device
@@ -119,12 +103,46 @@ def discover_devices(timeout: int = 10) -> list[dict]:
         devices.append(current)
 
     # Filter out meta-backends and bare backend names
-    devices = [
+    return [
         d for d in devices
         if "://" in d["uri"]
         and d["uri"].split("://")[0] not in FILTERED_SCHEMES
     ]
 
+
+def discover_devices(
+    timeout: int = 10,
+    include_schemes: Optional[str] = None,
+    exclude_schemes: Optional[str] = None,
+) -> list[dict]:
+    """Discover available CUPS devices using lpinfo.
+
+    Args:
+        timeout: Subprocess timeout in seconds.
+        include_schemes: If set, pass --include-schemes to lpinfo.
+        exclude_schemes: If set, pass --exclude-schemes to lpinfo.
+
+    Returns a list of dicts with keys: uri, make_model, info.
+    """
+    cmd = ["lpinfo", "-l", "-v"]
+    if include_schemes:
+        cmd.extend(["--include-schemes", include_schemes])
+    if exclude_schemes:
+        cmd.extend(["--exclude-schemes", exclude_schemes])
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpinfo not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Device discovery timed out after {timeout}s")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"lpinfo failed (exit {result.returncode}): {result.stderr.strip()}")
+
+    devices = _parse_lpinfo_output(result.stdout)
     logger.info("Discovered %d device(s)", len(devices))
     return devices
 
