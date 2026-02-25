@@ -73,41 +73,27 @@ def print_pdf(
 
 
 def _parse_lpinfo_output(stdout: str) -> list[dict]:
-    """Parse lpinfo -l -v output into a list of device dicts."""
+    """Parse lpinfo -v output into a list of device dicts.
+
+    Each line has the format: <class> <uri>
+    e.g. "network dnssd://Printer._ipp._tcp.local/"
+    """
     FILTERED_SCHEMES = {"cups-brf", "implicitclass"}
 
     devices = []
-    current: Optional[dict] = None
-
     for line in stdout.splitlines():
-        line = line.strip()
-        if line.startswith("Device:"):
-            # Flush previous device
-            if current and "uri" in current:
-                devices.append(current)
-            # Start new device — "Device: uri = ..."
-            parts = line.split("=", 1)
-            uri = parts[1].strip() if len(parts) == 2 else ""
-            current = {"uri": uri, "make_model": "", "info": ""}
-        elif current is not None and "=" in line:
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if key == "make-and-model":
-                current["make_model"] = value
-            elif key == "info":
-                current["info"] = value
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        uri = parts[1]
+        if "://" not in uri:
+            continue
+        scheme = uri.split("://")[0]
+        if scheme in FILTERED_SCHEMES:
+            continue
+        devices.append({"uri": uri, "make_model": "", "info": ""})
 
-    # Flush last device
-    if current and "uri" in current:
-        devices.append(current)
-
-    # Filter out meta-backends and bare backend names
-    return [
-        d for d in devices
-        if "://" in d["uri"]
-        and d["uri"].split("://")[0] not in FILTERED_SCHEMES
-    ]
+    return devices
 
 
 def discover_devices(timeout: int = 10) -> list[dict]:
@@ -118,7 +104,7 @@ def discover_devices(timeout: int = 10) -> list[dict]:
 
     Returns a list of dicts with keys: uri, make_model, info.
     """
-    cmd = ["lpinfo", "-l", "-v"]
+    cmd = ["lpinfo", "-v"]
 
     try:
         result = subprocess.run(
