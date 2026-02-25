@@ -6,6 +6,8 @@
     system: yes
     create_home: no
     shell: /usr/sbin/nologin
+    groups: lpadmin
+    append: yes
   become: yes
 
 - name: Create base directories
