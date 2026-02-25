@@ -3,6 +3,7 @@
     name:
       - cups
       - avahi-daemon
+      - avahi-utils
       - ipp-usb
     state: present
     update_cache: yes

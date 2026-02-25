@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import shlex
 import subprocess
 from typing import Optional
@@ -111,7 +112,63 @@ def _parse_backend_output(stdout: str) -> list[dict]:
 
 
 _BACKEND_DIR = "/usr/lib/cups/backend"
-_DISCOVERY_BACKENDS = ["dnssd"]
+_DISCOVERY_BACKENDS = ["dnssd", "snmp"]
+
+
+def _discover_ipp_services(timeout: int = 10) -> list[dict]:
+    """Discover IPP services via avahi-browse.
+
+    The CUPS dnssd backend reports only one URI per printer, preferring
+    _pdl-datastream over _ipp.  This supplements discovery with explicit
+    _ipp._tcp browsing so users can add printers with driverless IPP
+    Everywhere support.
+    """
+    try:
+        result = subprocess.run(
+            ["avahi-browse", "-rpt", "_ipp._tcp"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        logger.debug("avahi-browse not found, skipping IPP service discovery")
+        return []
+    except subprocess.TimeoutExpired:
+        logger.warning("avahi-browse timed out after %ds", timeout)
+        return []
+
+    devices = []
+    seen: set[str] = set()
+    for line in result.stdout.splitlines():
+        if not line.startswith("="):
+            continue
+        parts = line.split(";")
+        if len(parts) < 10:
+            continue
+        # Format: =;iface;proto;name;type;domain;host;addr;port;txt...
+        name = parts[3]
+        domain = parts[5]  # local
+
+        key = f"{name}._ipp._tcp.{domain}"
+        if key in seen:
+            continue
+        seen.add(key)
+
+        # Parse TXT records: "key1=val1" "key2=val2" ...
+        txt_raw = ";".join(parts[9:])
+        make_model = ""
+        uuid = ""
+        for field in re.findall(r'"([^"]*)"', txt_raw):
+            if field.startswith("ty="):
+                make_model = field[3:]
+            elif field.startswith("UUID="):
+                uuid = field[5:]
+
+        uri = f"dnssd://{name}._ipp._tcp.{domain}/"
+        if uuid:
+            uri += f"?uuid={uuid}"
+
+        devices.append({"uri": uri, "make_model": make_model, "info": name})
+
+    return devices
 
 
 def discover_devices(timeout: int = 15) -> list[dict]:
@@ -119,7 +176,8 @@ def discover_devices(timeout: int = 15) -> list[dict]:
 
     lpinfo -v on CUPS 2.4.x fails to enumerate dnssd devices, so we
     invoke the backend(s) directly — each outputs discovered devices
-    on stdout when called with no arguments.
+    on stdout when called with no arguments.  Additionally discovers
+    _ipp._tcp services via avahi-browse for driverless IPP support.
 
     Args:
         timeout: Subprocess timeout in seconds per backend.
@@ -148,8 +206,19 @@ def discover_devices(timeout: int = 15) -> list[dict]:
 
         devices.extend(_parse_backend_output(result.stdout))
 
-    logger.info("Discovered %d device(s)", len(devices))
-    return devices
+    # Supplement with avahi-browse for _ipp._tcp driverless URIs
+    devices.extend(_discover_ipp_services(timeout=timeout))
+
+    # Deduplicate by URI (dnssd backend and avahi-browse may overlap)
+    seen_uris: set[str] = set()
+    unique = []
+    for dev in devices:
+        if dev["uri"] not in seen_uris:
+            seen_uris.add(dev["uri"])
+            unique.append(dev)
+
+    logger.info("Discovered %d device(s)", len(unique))
+    return unique
 
 
 def add_printer(
