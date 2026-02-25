@@ -128,14 +128,30 @@ class GatewayClient:
             logger.warning("Unknown message type: %s", msg_type)
 
     async def _handle_discover_devices(self, request_id: str, timeout: int):
-        """Run device discovery in phases and send results back to the server."""
-        # Server waits 2x the hint; give lpinfo most of that window
-        subprocess_timeout = max(timeout * 2 - 2, 15)
+        """Run device discovery and send results back to the server.
+
+        lpinfo can take 30-60s on a Raspberry Pi.  The server SSE loop
+        times out after 25s of *silence*, so we send keepalive status
+        messages every 10s while lpinfo is running.
+        """
+        subprocess_timeout = max(timeout * 5, 50)
         try:
             await self._send_discover_status(request_id, "Scanning for devices...")
-            devices = await asyncio.to_thread(
-                discover_devices, subprocess_timeout,
+            discovery = asyncio.get_event_loop().run_in_executor(
+                None, discover_devices, subprocess_timeout,
             )
+            # Send keepalives while lpinfo is working
+            while True:
+                try:
+                    devices = await asyncio.wait_for(
+                        asyncio.shield(discovery), timeout=10.0,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    await self._send_discover_status(
+                        request_id, "Still scanning for devices...",
+                    )
+
             await self._send_discover_status(
                 request_id, f"Found {len(devices)} device(s), finishing up...",
             )
