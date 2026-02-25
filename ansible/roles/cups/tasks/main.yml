@@ -20,3 +20,4 @@
 - name: Set default print options (disable duplex)
   command: lpoptions -p {{ PRINTER_NAME }} -o sides=one-sided -o media=A4
   become: yes
+  when: PRINTER_NAME is defined and PRINTER_NAME != "" and PRINTER_NAME != "DryRun"

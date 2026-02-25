@@ -1,0 +1,6 @@
+WS_URL: "wss://printgateway.toorren.nl/ws/gateway"
+STATE_DIR: "/var/lib/printbot"
+HEARTBEAT_INTERVAL: 30
+RECONNECT_DELAY: 5
+MAX_RECONNECT_DELAY: 300
+LOG_LEVEL: "INFO"

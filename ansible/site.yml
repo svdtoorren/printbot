@@ -1,16 +1,5 @@
-- hosts: printpi
+- hosts: printgateways
   become: yes
-  vars:
-    GATEWAY_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    API_KEY: "pgw_CHANGEME"
-    WS_URL: "wss://printgateway.toorren.nl/ws/gateway"
-    PRINTER_NAME: "PRINTERNAAM"
-    STATE_DIR: "/var/lib/printbot"
-    HEARTBEAT_INTERVAL: 30
-    RECONNECT_DELAY: 5
-    MAX_RECONNECT_DELAY: 300
-    DRY_RUN: "false"
-    LOG_LEVEL: "INFO"
   roles:
     - cups
     - printbot
