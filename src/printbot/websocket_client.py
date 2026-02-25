@@ -316,7 +316,7 @@ class GatewayClient:
         self._ota_in_progress = True
         try:
             await self._send_ota_status(version, "downloading")
-            await asyncio.to_thread(perform_ota_update, url, checksum, version)
+            await asyncio.to_thread(perform_ota_update, url, checksum, version, self.settings.api_key)
             await self._send_ota_status(version, "completed")
             logger.info("OTA update to v%s completed, restarting service", version)
             await asyncio.to_thread(restart_service)

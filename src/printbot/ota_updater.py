@@ -16,13 +16,14 @@ def restart_service() -> None:
     subprocess.run(["sudo", "systemctl", "restart", "printbot"], check=True, timeout=30)
 
 
-def perform_ota_update(url: str, checksum: str, version: str) -> None:
+def perform_ota_update(url: str, checksum: str, version: str, api_key: str = "") -> None:
     """Download, verify, extract, and install an OTA update.
 
     Args:
         url: URL to download the .tar.gz update package
         checksum: Expected SHA-256 checksum (format: "sha256:<hex>")
         version: Version string for logging
+        api_key: Optional API key for authenticated downloads
     """
     logger.info("Starting OTA update to version %s", version)
 
@@ -34,7 +35,10 @@ def perform_ota_update(url: str, checksum: str, version: str) -> None:
 
         # Download
         logger.info("Downloading update from %s", url)
-        resp = requests.get(url, timeout=120, stream=True)
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        resp = requests.get(url, timeout=120, stream=True, headers=headers)
         resp.raise_for_status()
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
