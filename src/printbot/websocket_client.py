@@ -10,7 +10,7 @@ import websockets
 from . import __version__
 from .config import Settings
 from .job_handler import handle_print_job
-from .ota_updater import perform_ota_update, restart_service
+from .ota_updater import perform_ota_update, request_restart
 from .printing import (
     add_printer,
     discover_devices,
@@ -318,7 +318,7 @@ class GatewayClient:
             await asyncio.to_thread(perform_ota_update, url, checksum, version, self.settings.api_key)
             await self._send_ota_status(version, "completed")
             logger.info("OTA update to v%s completed, restarting service", version)
-            await asyncio.to_thread(restart_service)
+            request_restart()
         except Exception as e:
             logger.exception("OTA update to v%s failed: %s", version, e)
             await self._send_ota_status(version, "failed", str(e))

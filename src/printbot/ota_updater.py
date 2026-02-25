@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import signal
 import shutil
 import subprocess
 import tarfile
@@ -11,10 +12,14 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-def restart_service() -> None:
-    """Restart the printbot systemd service."""
-    logger.info("Restarting printbot service")
-    subprocess.run(["sudo", "systemctl", "restart", "printbot"], check=True, timeout=30)
+def request_restart() -> None:
+    """Request a service restart by sending SIGTERM to ourselves.
+
+    Systemd will restart the service automatically (Restart=always),
+    picking up the newly installed code.
+    """
+    logger.info("Sending SIGTERM to self for restart (pid=%d)", os.getpid())
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def perform_ota_update(url: str, checksum: str, version: str, api_key: str = "") -> None:
