@@ -10,11 +10,11 @@ import websockets
 from .config import Settings
 from .job_handler import handle_print_job
 from .ota_updater import perform_ota_update, restart_service
-from .printing import get_printer_status
+from .printing import discover_devices, get_printer_status
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def _get_local_ip() -> str:
@@ -108,6 +108,12 @@ class GatewayClient:
         elif msg_type == "config_update":
             logger.info("Config update received: %s", msg.get("printer_config", {}))
 
+        elif msg_type == "discover_devices":
+            request_id = msg.get("request_id", "")
+            timeout = msg.get("timeout", 10)
+            logger.info("Device discovery requested (request_id=%s)", request_id)
+            asyncio.create_task(self._handle_discover_devices(request_id, timeout))
+
         elif msg_type == "ota_update":
             url = msg.get("url", "")
             checksum = msg.get("checksum", "")
@@ -117,6 +123,25 @@ class GatewayClient:
 
         else:
             logger.warning("Unknown message type: %s", msg_type)
+
+    async def _handle_discover_devices(self, request_id: str, timeout: int):
+        """Run device discovery and send results back to the server."""
+        try:
+            devices = await asyncio.to_thread(discover_devices, timeout)
+            await self._send({
+                "type": "discover_devices_response",
+                "request_id": request_id,
+                "devices": devices,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("Device discovery failed: %s", e)
+            await self._send({
+                "type": "discover_devices_response",
+                "request_id": request_id,
+                "devices": [],
+                "error": str(e),
+            })
 
     async def _handle_ota_update(self, url: str, checksum: str, version: str):
         """Download and install an OTA update, reporting status to the server."""

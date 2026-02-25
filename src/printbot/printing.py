@@ -71,6 +71,63 @@ def print_pdf(
                 pass
 
 
+def discover_devices(timeout: int = 10) -> list[dict]:
+    """Discover available CUPS devices using lpinfo.
+
+    Returns a list of dicts with keys: uri, make_model, info.
+    """
+    FILTERED_SCHEMES = {"cups-brf", "implicitclass"}
+
+    try:
+        result = subprocess.run(
+            ["lpinfo", "-l", "-v"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpinfo not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Device discovery timed out after {timeout}s")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"lpinfo failed (exit {result.returncode}): {result.stderr.strip()}")
+
+    devices = []
+    current: dict | None = None
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("Device:"):
+            # Flush previous device
+            if current and "uri" in current:
+                devices.append(current)
+            # Start new device — "Device: uri = ..."
+            parts = line.split("=", 1)
+            uri = parts[1].strip() if len(parts) == 2 else ""
+            current = {"uri": uri, "make_model": "", "info": ""}
+        elif current is not None and "=" in line:
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if key == "make-and-model":
+                current["make_model"] = value
+            elif key == "info":
+                current["info"] = value
+
+    # Flush last device
+    if current and "uri" in current:
+        devices.append(current)
+
+    # Filter out meta-backends and bare backend names
+    devices = [
+        d for d in devices
+        if "://" in d["uri"]
+        and d["uri"].split("://")[0] not in FILTERED_SCHEMES
+    ]
+
+    logger.info("Discovered %d device(s)", len(devices))
+    return devices
+
+
 def get_printer_status(printer_name: str) -> str:
     """Get printer status via lpstat. Returns 'idle', 'printing', or 'unknown'."""
     try:
