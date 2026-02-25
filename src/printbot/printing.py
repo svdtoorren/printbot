@@ -242,6 +242,10 @@ def add_printer(
     cmd = ["lpadmin", "-p", printer_name, "-v", device_uri]
 
     model = ppd.strip() if ppd else "everywhere"
+    # IPP Everywhere can't query attributes over raw sockets — use raw driver
+    if model == "everywhere" and "_pdl-datastream._tcp" in device_uri:
+        model = "raw"
+        logger.info("URI is _pdl-datastream (raw socket); using 'raw' model instead of 'everywhere'")
     cmd.extend(["-m", model])
 
     if description:
@@ -275,17 +279,21 @@ def add_printer(
 def list_printers() -> list[dict]:
     """List all CUPS printers with their status, URI, and default flag.
 
+    Uses a single ``lpstat -p -v -d`` call to avoid sequential timeouts
+    when cupsd is slow (worst case 10s instead of 30s with three calls).
+
     Returns a list of dicts with keys: name, uri, state, info, is_default.
     """
     printers: dict[str, dict] = {}
+    default_name: str = ""
 
-    # Get printer states: "printer <name> is idle/disabled/..."
     try:
         result = subprocess.run(
-            ["lpstat", "-p"],
+            ["lpstat", "-p", "-v", "-d"],
             capture_output=True, text=True, timeout=10,
         )
         for line in result.stdout.splitlines():
+            # "printer <name> is idle/disabled/..."
             m = re.match(r"printer\s+(\S+)\s+(.*)", line)
             if m:
                 name = m.group(1)
@@ -298,40 +306,27 @@ def list_printers() -> list[dict]:
                     state = "stopped"
                 else:
                     state = "unknown"
-                printers[name] = {"name": name, "uri": "", "state": state, "info": "", "is_default": False}
-    except Exception as e:
-        logger.warning("lpstat -p failed: %s", e)
+                printers.setdefault(name, {"name": name, "uri": "", "state": "unknown", "info": "", "is_default": False})
+                printers[name]["state"] = state
+                continue
 
-    # Get device URIs: "device for <name>: <uri>"
-    try:
-        result = subprocess.run(
-            ["lpstat", "-v"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stdout.splitlines():
+            # "device for <name>: <uri>"
             m = re.match(r"device for (\S+):\s+(\S+)", line)
             if m:
                 name, uri = m.group(1), m.group(2)
-                if name in printers:
-                    printers[name]["uri"] = uri
-                else:
-                    printers[name] = {"name": name, "uri": uri, "state": "unknown", "info": "", "is_default": False}
-    except Exception as e:
-        logger.warning("lpstat -v failed: %s", e)
+                printers.setdefault(name, {"name": name, "uri": "", "state": "unknown", "info": "", "is_default": False})
+                printers[name]["uri"] = uri
+                continue
 
-    # Get default printer: "system default destination: <name>"
-    try:
-        result = subprocess.run(
-            ["lpstat", "-d"],
-            capture_output=True, text=True, timeout=10,
-        )
-        m = re.search(r"system default destination:\s+(\S+)", result.stdout)
-        if m:
-            default_name = m.group(1)
-            if default_name in printers:
-                printers[default_name]["is_default"] = True
+            # "system default destination: <name>"
+            m = re.match(r"system default destination:\s+(\S+)", line)
+            if m:
+                default_name = m.group(1)
     except Exception as e:
-        logger.warning("lpstat -d failed: %s", e)
+        logger.warning("lpstat -pvd failed: %s", e)
+
+    if default_name and default_name in printers:
+        printers[default_name]["is_default"] = True
 
     printer_list = list(printers.values())
     logger.info("Listed %d CUPS printer(s)", len(printer_list))
