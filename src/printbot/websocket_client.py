@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import socket
 import time
 
 import websockets
@@ -14,6 +15,16 @@ from .printing import get_printer_status
 logger = logging.getLogger(__name__)
 
 __version__ = "0.2.0"
+
+
+def _get_local_ip() -> str:
+    """Get the local LAN IP address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return ""
 
 
 class GatewayClient:
@@ -146,6 +157,7 @@ class GatewayClient:
                     "version": __version__,
                     "printer_status": printer_status,
                     "uptime": uptime,
+                    "local_ip": _get_local_ip(),
                 })
                 logger.debug("Heartbeat sent (printer=%s, uptime=%ds)", printer_status, uptime)
             except Exception as e:
