@@ -72,53 +72,82 @@ def print_pdf(
                 pass
 
 
-def _parse_lpinfo_output(stdout: str) -> list[dict]:
-    """Parse lpinfo -v output into a list of device dicts.
+def _parse_backend_output(stdout: str) -> list[dict]:
+    """Parse CUPS backend device-listing output.
 
-    Each line has the format: <class> <uri>
-    e.g. "network dnssd://Printer._ipp._tcp.local/"
+    Each line has the format:
+        <class> <uri> "<make_model>" "<info>" "<device_id>" ""
+    e.g.:
+        network dnssd://Printer._ipp._tcp.local/ "Maker Model" "Printer" "MFG:...;" ""
     """
+    import shlex as _shlex
+
     FILTERED_SCHEMES = {"cups-brf", "implicitclass"}
 
     devices = []
     for line in stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
+        line = line.strip()
+        if not line:
             continue
-        uri = parts[1]
+        try:
+            tokens = _shlex.split(line)
+        except ValueError:
+            continue
+        if len(tokens) < 2:
+            continue
+        uri = tokens[1]
         if "://" not in uri:
             continue
         scheme = uri.split("://")[0]
         if scheme in FILTERED_SCHEMES:
             continue
-        devices.append({"uri": uri, "make_model": "", "info": ""})
+        devices.append({
+            "uri": uri,
+            "make_model": tokens[2] if len(tokens) > 2 else "",
+            "info": tokens[3] if len(tokens) > 3 else "",
+        })
 
     return devices
 
 
-def discover_devices(timeout: int = 10) -> list[dict]:
-    """Discover available CUPS devices using lpinfo.
+_BACKEND_DIR = "/usr/lib/cups/backend"
+_DISCOVERY_BACKENDS = ["dnssd"]
+
+
+def discover_devices(timeout: int = 15) -> list[dict]:
+    """Discover available CUPS devices by running backends directly.
+
+    lpinfo -v on CUPS 2.4.x fails to enumerate dnssd devices, so we
+    invoke the backend(s) directly — each outputs discovered devices
+    on stdout when called with no arguments.
 
     Args:
-        timeout: Subprocess timeout in seconds.
+        timeout: Subprocess timeout in seconds per backend.
 
     Returns a list of dicts with keys: uri, make_model, info.
     """
-    cmd = ["lpinfo", "-v"]
+    devices = []
+    for backend in _DISCOVERY_BACKENDS:
+        backend_path = f"{_BACKEND_DIR}/{backend}"
+        try:
+            result = subprocess.run(
+                [backend_path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except FileNotFoundError:
+            logger.warning("Backend %s not found at %s", backend, backend_path)
+            continue
+        except subprocess.TimeoutExpired:
+            logger.warning("Backend %s timed out after %ds", backend, timeout)
+            continue
 
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError:
-        raise RuntimeError("CUPS is not installed (lpinfo not found)")
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Device discovery timed out after {timeout}s")
+        if result.returncode != 0:
+            logger.warning("Backend %s failed (exit %d): %s",
+                           backend, result.returncode, result.stderr.strip())
+            continue
 
-    if result.returncode != 0:
-        raise RuntimeError(f"lpinfo failed (exit {result.returncode}): {result.stderr.strip()}")
+        devices.extend(_parse_backend_output(result.stdout))
 
-    devices = _parse_lpinfo_output(result.stdout)
     logger.info("Discovered %d device(s)", len(devices))
     return devices
 

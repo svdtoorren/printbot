@@ -130,9 +130,9 @@ class GatewayClient:
     async def _handle_discover_devices(self, request_id: str, timeout: int):
         """Run device discovery and send results back to the server.
 
-        lpinfo can take 30-60s on a Raspberry Pi.  The server SSE loop
-        times out after 25s of *silence*, so we send keepalive status
-        messages every 10s while lpinfo is running.
+        Backend discovery can take 10-30s on a Raspberry Pi.  The server
+        SSE loop times out after 25s of *silence*, so we send keepalive
+        status messages every 10s while discovery is running.
         """
         subprocess_timeout = max(timeout * 5, 50)
         try:
@@ -140,7 +140,7 @@ class GatewayClient:
             discovery = asyncio.get_event_loop().run_in_executor(
                 None, discover_devices, subprocess_timeout,
             )
-            # Send keepalives while lpinfo is working
+            # Send keepalives while backend discovery is working
             while True:
                 try:
                     devices = await asyncio.wait_for(
