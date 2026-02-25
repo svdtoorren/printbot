@@ -10,7 +10,14 @@ import websockets
 from .config import Settings
 from .job_handler import handle_print_job
 from .ota_updater import perform_ota_update, restart_service
-from .printing import add_printer, discover_devices, get_printer_status
+from .printing import (
+    add_printer,
+    discover_devices,
+    get_printer_status,
+    list_printers,
+    remove_printer,
+    set_default_printer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +124,15 @@ class GatewayClient:
         elif msg_type == "cups_add_printer":
             asyncio.create_task(self._handle_cups_add_printer(msg))
 
+        elif msg_type == "cups_list_printers":
+            asyncio.create_task(self._handle_cups_list_printers(msg))
+
+        elif msg_type == "cups_remove_printer":
+            asyncio.create_task(self._handle_cups_remove_printer(msg))
+
+        elif msg_type == "cups_set_default":
+            asyncio.create_task(self._handle_cups_set_default(msg))
+
         elif msg_type == "ota_update":
             url = msg.get("url", "")
             checksum = msg.get("checksum", "")
@@ -206,6 +222,83 @@ class GatewayClient:
             })
         except Exception as e:
             logger.exception("cups_add_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_list_printers(self, msg: dict):
+        """List CUPS printers and send the result back."""
+        request_id = msg.get("request_id", "")
+        logger.info("cups_list_printers request (request_id=%s)", request_id)
+        try:
+            printers = await asyncio.to_thread(list_printers)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": printers,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_list_printers failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_remove_printer(self, msg: dict):
+        """Remove a CUPS printer and send the result back."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_remove_printer request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            await asyncio.to_thread(remove_printer, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_remove_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_set_default(self, msg: dict):
+        """Set the default CUPS printer and send the result back."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_set_default request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            await asyncio.to_thread(set_default_printer, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_set_default failed: %s", e)
             await self._send({
                 "type": "cups_response",
                 "request_id": request_id,

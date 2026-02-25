@@ -272,6 +272,112 @@ def add_printer(
     logger.info("Printer '%s' added successfully", printer_name)
 
 
+def list_printers() -> list[dict]:
+    """List all CUPS printers with their status, URI, and default flag.
+
+    Returns a list of dicts with keys: name, uri, state, info, is_default.
+    """
+    printers: dict[str, dict] = {}
+
+    # Get printer states: "printer <name> is idle/disabled/..."
+    try:
+        result = subprocess.run(
+            ["lpstat", "-p"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            m = re.match(r"printer\s+(\S+)\s+(.*)", line)
+            if m:
+                name = m.group(1)
+                rest = m.group(2).lower()
+                if "idle" in rest:
+                    state = "idle"
+                elif "printing" in rest or "processing" in rest:
+                    state = "processing"
+                elif "disabled" in rest or "stopped" in rest:
+                    state = "stopped"
+                else:
+                    state = "unknown"
+                printers[name] = {"name": name, "uri": "", "state": state, "info": "", "is_default": False}
+    except Exception as e:
+        logger.warning("lpstat -p failed: %s", e)
+
+    # Get device URIs: "device for <name>: <uri>"
+    try:
+        result = subprocess.run(
+            ["lpstat", "-v"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            m = re.match(r"device for (\S+):\s+(\S+)", line)
+            if m:
+                name, uri = m.group(1), m.group(2)
+                if name in printers:
+                    printers[name]["uri"] = uri
+                else:
+                    printers[name] = {"name": name, "uri": uri, "state": "unknown", "info": "", "is_default": False}
+    except Exception as e:
+        logger.warning("lpstat -v failed: %s", e)
+
+    # Get default printer: "system default destination: <name>"
+    try:
+        result = subprocess.run(
+            ["lpstat", "-d"],
+            capture_output=True, text=True, timeout=10,
+        )
+        m = re.search(r"system default destination:\s+(\S+)", result.stdout)
+        if m:
+            default_name = m.group(1)
+            if default_name in printers:
+                printers[default_name]["is_default"] = True
+    except Exception as e:
+        logger.warning("lpstat -d failed: %s", e)
+
+    printer_list = list(printers.values())
+    logger.info("Listed %d CUPS printer(s)", len(printer_list))
+    return printer_list
+
+
+def remove_printer(printer_name: str) -> None:
+    """Remove a printer from CUPS using lpadmin -x."""
+    logger.info("Removing printer '%s'", printer_name)
+    try:
+        result = subprocess.run(
+            ["lpadmin", "-x", printer_name],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpadmin not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("lpadmin timed out after 30 seconds")
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"lpadmin exited with code {result.returncode}"
+        raise RuntimeError(f"Failed to remove printer: {error_msg}")
+
+    logger.info("Printer '%s' removed successfully", printer_name)
+
+
+def set_default_printer(printer_name: str) -> None:
+    """Set the default CUPS printer using lpadmin -d."""
+    logger.info("Setting default printer to '%s'", printer_name)
+    try:
+        result = subprocess.run(
+            ["lpadmin", "-d", printer_name],
+            capture_output=True, text=True, timeout=30,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpadmin not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("lpadmin timed out after 30 seconds")
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"lpadmin exited with code {result.returncode}"
+        raise RuntimeError(f"Failed to set default printer: {error_msg}")
+
+    logger.info("Default printer set to '%s'", printer_name)
+
+
 def get_printer_status(printer_name: str) -> str:
     """Get printer status via lpstat. Returns 'idle', 'printing', or 'unknown'."""
     try:
