@@ -2,6 +2,7 @@ import logging
 import os
 import shlex
 import subprocess
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def discover_devices(timeout: int = 10) -> list[dict]:
         raise RuntimeError(f"lpinfo failed (exit {result.returncode}): {result.stderr.strip()}")
 
     devices = []
-    current: dict | None = None
+    current: Optional[dict] = None
 
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -126,6 +127,57 @@ def discover_devices(timeout: int = 10) -> list[dict]:
 
     logger.info("Discovered %d device(s)", len(devices))
     return devices
+
+
+def add_printer(
+    printer_name: str,
+    device_uri: str,
+    ppd: str = "",
+    description: str = "",
+    location: str = "",
+    options: Optional[dict] = None,
+) -> None:
+    """Add a printer to CUPS using lpadmin.
+
+    Args:
+        printer_name: CUPS queue name
+        device_uri: Device URI (e.g. ipp://..., usb://...)
+        ppd: PPD or model string; defaults to 'everywhere' (driverless IPP)
+        description: Human-readable description
+        location: Physical location string
+        options: Additional CUPS options as key=value pairs
+    """
+    cmd = ["lpadmin", "-p", printer_name, "-v", device_uri]
+
+    model = ppd.strip() if ppd else "everywhere"
+    cmd.extend(["-m", model])
+
+    if description:
+        cmd.extend(["-D", description])
+    if location:
+        cmd.extend(["-L", location])
+
+    cmd.append("-E")  # enable and accept jobs
+
+    if options:
+        for key, value in options.items():
+            cmd.extend(["-o", f"{key}={value}"])
+
+    logger.info("Adding printer '%s' (uri=%s, model=%s)", printer_name, device_uri, model)
+    logger.debug("lpadmin command: %s", cmd)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpadmin not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("lpadmin timed out after 30 seconds")
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"lpadmin exited with code {result.returncode}"
+        raise RuntimeError(f"Failed to add printer: {error_msg}")
+
+    logger.info("Printer '%s' added successfully", printer_name)
 
 
 def get_printer_status(printer_name: str) -> str:

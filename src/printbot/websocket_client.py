@@ -10,11 +10,11 @@ import websockets
 from .config import Settings
 from .job_handler import handle_print_job
 from .ota_updater import perform_ota_update, restart_service
-from .printing import discover_devices, get_printer_status
+from .printing import add_printer, discover_devices, get_printer_status
 
 logger = logging.getLogger(__name__)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 def _get_local_ip() -> str:
@@ -114,6 +114,9 @@ class GatewayClient:
             logger.info("Device discovery requested (request_id=%s)", request_id)
             asyncio.create_task(self._handle_discover_devices(request_id, timeout))
 
+        elif msg_type == "cups_add_printer":
+            asyncio.create_task(self._handle_cups_add_printer(msg))
+
         elif msg_type == "ota_update":
             url = msg.get("url", "")
             checksum = msg.get("checksum", "")
@@ -142,6 +145,42 @@ class GatewayClient:
                 "type": "discover_devices_response",
                 "request_id": request_id,
                 "devices": [],
+                "error": str(e),
+            })
+
+    async def _handle_cups_add_printer(self, msg: dict):
+        """Add a printer to CUPS and send the result back."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        device_uri = msg.get("device_uri", "")
+        logger.info(
+            "cups_add_printer request (request_id=%s, name=%s, uri=%s)",
+            request_id, printer_name, device_uri,
+        )
+        try:
+            await asyncio.to_thread(
+                add_printer,
+                printer_name=printer_name,
+                device_uri=device_uri,
+                ppd=msg.get("ppd", ""),
+                description=msg.get("description", ""),
+                location=msg.get("location", ""),
+                options=msg.get("options") or None,
+            )
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_add_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
                 "error": str(e),
             })
 
