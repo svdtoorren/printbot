@@ -132,17 +132,10 @@ class GatewayClient:
         # Server waits 2x the hint; give lpinfo most of that window
         subprocess_timeout = max(timeout * 2 - 2, 15)
         try:
-            await self._send_discover_status(request_id, "Scanning USB devices...")
-            usb_devices = await asyncio.to_thread(
-                discover_devices, subprocess_timeout, include_schemes="usb",
+            await self._send_discover_status(request_id, "Scanning for devices...")
+            devices = await asyncio.to_thread(
+                discover_devices, subprocess_timeout,
             )
-
-            await self._send_discover_status(request_id, "Scanning network devices...")
-            network_devices = await asyncio.to_thread(
-                discover_devices, subprocess_timeout, exclude_schemes="usb",
-            )
-
-            devices = usb_devices + network_devices
             await self._send_discover_status(
                 request_id, f"Found {len(devices)} device(s), finishing up...",
             )

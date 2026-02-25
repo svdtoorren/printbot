@@ -110,25 +110,15 @@ def _parse_lpinfo_output(stdout: str) -> list[dict]:
     ]
 
 
-def discover_devices(
-    timeout: int = 10,
-    include_schemes: Optional[str] = None,
-    exclude_schemes: Optional[str] = None,
-) -> list[dict]:
+def discover_devices(timeout: int = 10) -> list[dict]:
     """Discover available CUPS devices using lpinfo.
 
     Args:
         timeout: Subprocess timeout in seconds.
-        include_schemes: If set, pass --include-schemes to lpinfo.
-        exclude_schemes: If set, pass --exclude-schemes to lpinfo.
 
     Returns a list of dicts with keys: uri, make_model, info.
     """
     cmd = ["lpinfo", "-l", "-v"]
-    if include_schemes:
-        cmd.extend(["--include-schemes", include_schemes])
-    if exclude_schemes:
-        cmd.extend(["--exclude-schemes", exclude_schemes])
 
     try:
         result = subprocess.run(
