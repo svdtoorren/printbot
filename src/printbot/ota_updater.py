@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -55,15 +56,41 @@ def perform_ota_update(url: str, checksum: str, version: str, api_key: str = "")
             raise ValueError(f"Checksum mismatch: expected {expected_hash}, got {actual_hash}")
         logger.info("Checksum verified")
 
-        # Extract to /opt/printbot
+        # Extract to temp dir, then install mirroring Ansible layout
         install_dir = "/opt/printbot"
-        logger.info("Extracting to %s", install_dir)
-        with tarfile.open(tmp_path, "r:gz") as tar:
-            # Security: check for path traversal
-            for member in tar.getmembers():
-                if member.name.startswith("/") or ".." in member.name:
-                    raise ValueError(f"Unsafe path in archive: {member.name}")
-            tar.extractall(path=install_dir)
+        logger.info("Extracting update for %s", install_dir)
+        with tempfile.TemporaryDirectory(prefix="printbot_ota_extract_") as extract_dir:
+            with tarfile.open(tmp_path, "r:gz") as tar:
+                for member in tar.getmembers():
+                    if member.name.startswith("/") or ".." in member.name:
+                        raise ValueError(f"Unsafe path in archive: {member.name}")
+                tar.extractall(path=extract_dir)
+
+            # GitHub archives have a single top-level directory
+            entries = os.listdir(extract_dir)
+            if len(entries) != 1 or not os.path.isdir(os.path.join(extract_dir, entries[0])):
+                raise ValueError(f"Expected single top-level dir in archive, got: {entries}")
+            archive_root = os.path.join(extract_dir, entries[0])
+
+            # Mirror Ansible layout: src/printbot/ → /opt/printbot/printbot/
+            src_pkg = os.path.join(archive_root, "src", "printbot")
+            if not os.path.isdir(src_pkg):
+                raise ValueError("Expected src/printbot/ in archive, not found")
+
+            dest_pkg = os.path.join(install_dir, "printbot")
+            if os.path.exists(dest_pkg):
+                shutil.rmtree(dest_pkg)
+            shutil.copytree(src_pkg, dest_pkg)
+
+            # Copy requirements.txt
+            src_req = os.path.join(archive_root, "requirements.txt")
+            if os.path.isfile(src_req):
+                shutil.copy2(src_req, os.path.join(install_dir, "requirements.txt"))
+
+        # Write version file so heartbeat reports the correct version
+        version_file = os.path.join(install_dir, "VERSION")
+        with open(version_file, "w") as f:
+            f.write(version)
 
         # Install new requirements
         logger.info("Installing updated requirements")

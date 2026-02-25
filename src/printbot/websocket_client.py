@@ -7,6 +7,7 @@ import time
 
 import websockets
 
+from . import __version__
 from .config import Settings
 from .job_handler import handle_print_job
 from .ota_updater import perform_ota_update, restart_service
@@ -20,8 +21,6 @@ from .printing import (
 )
 
 logger = logging.getLogger(__name__)
-
-__version__ = "0.4.0"
 
 
 def _get_local_ip() -> str:
