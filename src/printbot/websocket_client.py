@@ -126,8 +126,10 @@ class GatewayClient:
 
     async def _handle_discover_devices(self, request_id: str, timeout: int):
         """Run device discovery and send results back to the server."""
+        # Server waits 2x the hint; give lpinfo most of that window
+        subprocess_timeout = max(timeout * 2 - 2, 15)
         try:
-            devices = await asyncio.to_thread(discover_devices, timeout)
+            devices = await asyncio.to_thread(discover_devices, subprocess_timeout)
             await self._send({
                 "type": "discover_devices_response",
                 "request_id": request_id,
