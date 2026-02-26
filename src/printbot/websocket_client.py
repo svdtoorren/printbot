@@ -112,7 +112,7 @@ class GatewayClient:
             await self._send({"type": "pong", "timestamp": msg.get("timestamp", "")})
 
         elif msg_type == "config_update":
-            logger.info("Config update received: %s", msg.get("printer_config", {}))
+            asyncio.create_task(self._handle_config_update(msg))
 
         elif msg_type == "discover_devices":
             request_id = msg.get("request_id", "")
@@ -306,6 +306,62 @@ class GatewayClient:
                 "error": str(e),
             })
 
+    async def _handle_config_update(self, msg: dict):
+        """Apply remote config changes, persist to .env, and send response."""
+        applied = {}
+        errors = []
+
+        # printer_name
+        if "printer_name" in msg and msg["printer_name"] is not None:
+            self.settings.printer_name = str(msg["printer_name"])
+            applied["printer_name"] = self.settings.printer_name
+
+        # dry_run
+        if "dry_run" in msg and msg["dry_run"] is not None:
+            self.settings.dry_run = bool(msg["dry_run"])
+            applied["dry_run"] = self.settings.dry_run
+
+        # log_level
+        if "log_level" in msg and msg["log_level"] is not None:
+            level_str = str(msg["log_level"]).upper()
+            if level_str in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+                self.settings.log_level = level_str
+                logging.getLogger().setLevel(level_str)
+                applied["log_level"] = level_str
+            else:
+                errors.append(f"Invalid log_level: {msg['log_level']}")
+
+        # heartbeat_interval
+        if "heartbeat_interval" in msg and msg["heartbeat_interval"] is not None:
+            try:
+                interval = int(msg["heartbeat_interval"])
+                if 10 <= interval <= 300:
+                    self.settings.heartbeat_interval = interval
+                    applied["heartbeat_interval"] = interval
+                else:
+                    errors.append(f"heartbeat_interval must be 10-300, got {interval}")
+            except (ValueError, TypeError):
+                errors.append(f"Invalid heartbeat_interval: {msg['heartbeat_interval']}")
+
+        # Persist to .env
+        if applied:
+            try:
+                self.settings.save_to_env()
+            except Exception as e:
+                logger.error("Failed to save config to .env: %s", e)
+                errors.append(f"Failed to persist: {e}")
+
+        success = len(errors) == 0
+        error_msg = "; ".join(errors) if errors else None
+        logger.info("Config update applied: %s%s", applied, f" (errors: {error_msg})" if error_msg else "")
+
+        await self._send({
+            "type": "config_response",
+            "success": success,
+            "applied": applied,
+            "error": error_msg,
+        })
+
     async def _handle_ota_update(self, url: str, checksum: str, version: str):
         """Download and install an OTA update, reporting status to the server."""
         if self._ota_in_progress:
@@ -346,6 +402,12 @@ class GatewayClient:
                     "printer_status": printer_status,
                     "uptime": uptime,
                     "local_ip": _get_local_ip(),
+                    "config": {
+                        "printer_name": self.settings.printer_name,
+                        "dry_run": self.settings.dry_run,
+                        "log_level": self.settings.log_level,
+                        "heartbeat_interval": self.settings.heartbeat_interval,
+                    },
                 })
                 logger.debug("Heartbeat sent (printer=%s, uptime=%ds)", printer_status, uptime)
             except Exception as e:
