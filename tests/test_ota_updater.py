@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from printbot.ota_updater import perform_ota_update, restart_service
+from printbot.ota_updater import perform_ota_update, request_restart
 
 
 def _make_tar_gz(files: dict) -> bytes:
@@ -43,7 +43,13 @@ class TestPerformOtaUpdate(unittest.TestCase):
     @patch("printbot.ota_updater.subprocess.run")
     @patch("printbot.ota_updater.requests.get")
     def test_successful_update(self, mock_get, mock_run):
-        archive = _make_tar_gz({"requirements.txt": b"requests\n"})
+        # Build an archive matching GitHub tarball structure:
+        # archive-root/src/printbot/__init__.py + archive-root/requirements.txt
+        archive = _make_tar_gz({
+            "printbot-abc123/requirements.txt": b"requests\n",
+            "printbot-abc123/src/printbot/__init__.py": b"__version__ = '0.3.0'\n",
+            "printbot-abc123/src/printbot/main.py": b"# main\n",
+        })
         checksum = hashlib.sha256(archive).hexdigest()
 
         response = MagicMock()
@@ -51,20 +57,24 @@ class TestPerformOtaUpdate(unittest.TestCase):
         response.raise_for_status = MagicMock()
         mock_get.return_value = response
 
-        with patch("printbot.ota_updater.tarfile.open") as mock_tar_open:
-            mock_tar = MagicMock()
-            member = MagicMock()
-            member.name = "requirements.txt"
-            mock_tar.getmembers.return_value = [member]
-            mock_tar.__enter__ = MagicMock(return_value=mock_tar)
-            mock_tar.__exit__ = MagicMock(return_value=False)
-            mock_tar_open.return_value = mock_tar
+        # Mock shutil ops and the version file write, but let real file I/O
+        # happen for temp file download + checksum verification
+        with patch("printbot.ota_updater.shutil.rmtree"), \
+             patch("printbot.ota_updater.shutil.copytree"), \
+             patch("printbot.ota_updater.shutil.copy2"):
+            # Patch the version file write at /opt/printbot/VERSION
+            original_open = open
+            def patched_open(path, *args, **kwargs):
+                if isinstance(path, str) and path == "/opt/printbot/VERSION":
+                    return MagicMock()
+                return original_open(path, *args, **kwargs)
 
-            perform_ota_update(
-                url="https://example.com/update.tar.gz",
-                checksum=f"sha256:{checksum}",
-                version="0.3.0",
-            )
+            with patch("builtins.open", side_effect=patched_open):
+                perform_ota_update(
+                    url="https://example.com/update.tar.gz",
+                    checksum=f"sha256:{checksum}",
+                    version="0.3.0",
+                )
 
         # pip install should have been called
         mock_run.assert_called_once()
@@ -123,15 +133,13 @@ class TestPerformOtaUpdate(unittest.TestCase):
             )
 
 
-class TestRestartService(unittest.TestCase):
-    @patch("printbot.ota_updater.subprocess.run")
-    def test_restart_service(self, mock_run):
-        restart_service()
-        mock_run.assert_called_once_with(
-            ["sudo", "systemctl", "restart", "printbot"],
-            check=True,
-            timeout=30,
-        )
+class TestRequestRestart(unittest.TestCase):
+    @patch("printbot.ota_updater.os.kill")
+    @patch("printbot.ota_updater.os.getpid", return_value=12345)
+    def test_request_restart_sends_sigterm(self, mock_getpid, mock_kill):
+        import signal
+        request_restart()
+        mock_kill.assert_called_once_with(12345, signal.SIGTERM)
 
 
 if __name__ == "__main__":
