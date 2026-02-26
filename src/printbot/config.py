@@ -56,7 +56,6 @@ class Settings:
             "gateway_id": self.gateway_id,
             "api_key": self.api_key,
             "ws_url": self.ws_url,
-            "printer_name": self.printer_name,
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
