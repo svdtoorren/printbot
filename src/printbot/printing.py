@@ -37,14 +37,15 @@ def print_pdf(
                 pass
         return
 
-    cmd_parts = [
-        "lp",
-        "-d", shlex.quote(printer_name),
+    cmd_parts = ["lp"]
+    if printer_name.strip():
+        cmd_parts.extend(["-d", shlex.quote(printer_name)])
+    cmd_parts.extend([
         "-o", "media=A4",
         "-o", "orientation-requested=3",
         "-n", str(copies),
         "-t", shlex.quote(title),
-    ]
+    ])
     if duplex:
         cmd_parts.extend(["-o", "sides=two-sided-long-edge"])
 
