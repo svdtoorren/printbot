@@ -8,6 +8,17 @@
     state: present
     update_cache: yes
 
+- name: Ensure CUPS backends are executable for device discovery
+  file:
+    path: "/usr/lib/cups/backend/{{ item }}"
+    owner: root
+    group: lpadmin
+    mode: "0750"
+  loop:
+    - dnssd
+    - snmp
+  ignore_errors: yes
+
 - name: Enable and start CUPS
   systemd:
     name: cups
