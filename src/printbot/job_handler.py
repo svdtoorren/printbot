@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 from datetime import datetime, timezone
 
-from .printing import print_pdf
+from .printing import print_pdf, print_raw
 
 logger = logging.getLogger(__name__)
 
@@ -74,41 +74,68 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
         logger.info("Job %s already printed, skipping", job_id)
         return {"status": "completed"}
 
-    if payload_type != "pdf":
-        return {"status": "failed", "error": f"Unsupported payload type: {payload_type}"}
-
     title = metadata.get("title", f"Job {job_id[:8]}")
-    copies = metadata.get("copies", 1)
-    duplex = metadata.get("duplex", False)
+    effective_printer = metadata.get("target_printer") or printer_name
 
-    # Decode base64 PDF to temp file
-    fd, pdf_path = tempfile.mkstemp(prefix="printbot_", suffix=".pdf")
-    try:
-        pdf_bytes = base64.b64decode(payload)
-        with os.fdopen(fd, "wb") as f:
-            f.write(pdf_bytes)
-
-        logger.info("Job %s: printing '%s' (%d bytes, copies=%d, duplex=%s)", job_id, title, len(pdf_bytes), copies, duplex)
-
-        print_pdf(
-            printer_name=printer_name,
-            title=title,
-            pdf_path=pdf_path,
-            cleanup=True,
-            copies=copies,
-            duplex=duplex,
-            dry_run=dry_run,
-        )
-
-        _mark_printed(db_path, job_id)
-        logger.info("Job %s completed", job_id)
-        return {"status": "completed"}
-
-    except Exception as e:
-        logger.exception("Job %s failed: %s", job_id, e)
-        # Clean up temp file on error
+    if payload_type == "raw":
+        if not effective_printer.strip():
+            return {"status": "failed", "error": "No target printer specified for raw job"}
+        fd, file_path = tempfile.mkstemp(prefix="printbot_", suffix=".prn")
         try:
-            os.remove(pdf_path)
-        except OSError:
-            pass
-        return {"status": "failed", "error": str(e)}
+            raw_bytes = base64.b64decode(payload)
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw_bytes)
+            logger.info("Job %s: raw print to '%s' (%d bytes)", job_id, effective_printer, len(raw_bytes))
+            print_raw(
+                printer_name=effective_printer,
+                title=title,
+                file_path=file_path,
+                cleanup=True,
+                dry_run=dry_run,
+            )
+            _mark_printed(db_path, job_id)
+            return {"status": "completed"}
+        except Exception as e:
+            logger.exception("Job %s failed: %s", job_id, e)
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            return {"status": "failed", "error": str(e)}
+
+    elif payload_type == "pdf":
+        copies = metadata.get("copies", 1)
+        duplex = metadata.get("duplex", False)
+
+        fd, pdf_path = tempfile.mkstemp(prefix="printbot_", suffix=".pdf")
+        try:
+            pdf_bytes = base64.b64decode(payload)
+            with os.fdopen(fd, "wb") as f:
+                f.write(pdf_bytes)
+
+            logger.info("Job %s: printing '%s' (%d bytes, copies=%d, duplex=%s)", job_id, title, len(pdf_bytes), copies, duplex)
+
+            print_pdf(
+                printer_name=effective_printer,
+                title=title,
+                pdf_path=pdf_path,
+                cleanup=True,
+                copies=copies,
+                duplex=duplex,
+                dry_run=dry_run,
+            )
+
+            _mark_printed(db_path, job_id)
+            logger.info("Job %s completed", job_id)
+            return {"status": "completed"}
+
+        except Exception as e:
+            logger.exception("Job %s failed: %s", job_id, e)
+            try:
+                os.remove(pdf_path)
+            except OSError:
+                pass
+            return {"status": "failed", "error": str(e)}
+
+    else:
+        return {"status": "failed", "error": f"Unsupported payload type: {payload_type}"}

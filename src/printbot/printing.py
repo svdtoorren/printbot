@@ -8,6 +8,52 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def print_raw(
+    printer_name: str,
+    title: str,
+    file_path: str,
+    cleanup: bool = True,
+    dry_run: bool = False,
+) -> None:
+    """Send raw data to CUPS printer (e.g. label printer commands)."""
+    if dry_run:
+        logger.info("[DRY_RUN] Would send raw data to '%s': %s", printer_name, title)
+        if cleanup:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+        return
+
+    cmd_parts = ["lp", "-o", "raw"]
+    if printer_name.strip():
+        cmd_parts.extend(["-d", shlex.quote(printer_name)])
+    cmd_parts.extend(["-t", shlex.quote(title)])
+    cmd_parts.append(shlex.quote(file_path))
+    cmd = " ".join(cmd_parts)
+
+    logger.info("Sending raw print job to CUPS queue '%s': %s", printer_name, title)
+    logger.debug("CUPS command: %s", cmd)
+
+    try:
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=30)
+        logger.info("Raw print job submitted to CUPS")
+        if result.stdout:
+            logger.debug("CUPS output: %s", result.stdout.strip())
+    except subprocess.CalledProcessError as e:
+        logger.error("CUPS command failed (exit %d): %s", e.returncode, e.stderr)
+        raise RuntimeError(f"Failed to submit raw print job: {e.stderr}") from e
+    except subprocess.TimeoutExpired:
+        logger.error("CUPS command timed out after 30 seconds")
+        raise RuntimeError("Raw print job submission timed out") from None
+    finally:
+        if cleanup:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+
 def print_pdf(
     printer_name: str,
     title: str,
