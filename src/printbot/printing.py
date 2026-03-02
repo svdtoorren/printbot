@@ -290,9 +290,12 @@ def add_printer(
 
     model = ppd.strip() if ppd else "everywhere"
     # IPP Everywhere can't query attributes over raw sockets — use raw driver
-    if model == "everywhere" and "_pdl-datastream._tcp" in device_uri:
+    if model == "everywhere" and (
+        "_pdl-datastream._tcp" in device_uri
+        or device_uri.startswith("socket://")
+    ):
         model = "raw"
-        logger.info("URI is _pdl-datastream (raw socket); using 'raw' model instead of 'everywhere'")
+        logger.info("URI is raw socket; using 'raw' model instead of 'everywhere'")
     cmd.extend(["-m", model])
 
     if description:
