@@ -1,12 +1,5 @@
-- hosts: printpi
+- hosts: printgateways
   become: yes
-  vars:
-    TENANT_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    CLIENT_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-    CLIENT_SECRET: "CHANGEME"
-    MAILBOX_UPN: "orders@yourdomain.tld"
-    FILTER_SENDER: "orders@bestelsite.tld"
-    PRINTER_NAME: "PRINTERNAAM"
   roles:
     - cups
     - printbot

@@ -1,5 +1,5 @@
 [Unit]
-Description=PrintBot - Auto print Exchange Online orders
+Description=PrintBot - WebSocket print gateway client
 After=network-online.target cups.service
 Wants=network-online.target
 
@@ -10,7 +10,7 @@ Group=printbot
 WorkingDirectory=/opt/printbot
 EnvironmentFile=/opt/printbot/.env
 ExecStart=/opt/printbot/.venv/bin/python -u -m printbot.main
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

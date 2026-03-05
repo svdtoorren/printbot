@@ -1,0 +1,4 @@
+GATEWAY_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+API_KEY: "pgw_CHANGEME"
+PRINTER_NAME: "YourPrinterName"
+DRY_RUN: "false"

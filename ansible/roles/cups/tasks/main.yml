@@ -3,21 +3,21 @@
     name:
       - cups
       - avahi-daemon
+      - avahi-utils
       - ipp-usb
     state: present
     update_cache: yes
 
-- name: Install WeasyPrint system dependencies
-  apt:
-    name:
-      - libpango-1.0-0
-      - libpangocairo-1.0-0
-      - libgdk-pixbuf2.0-0
-      - libffi-dev
-      - shared-mime-info
-      - libcairo2
-      - libpangoft2-1.0-0
-    state: present
+- name: Ensure CUPS backends are executable for device discovery
+  file:
+    path: "/usr/lib/cups/backend/{{ item }}"
+    owner: root
+    group: lpadmin
+    mode: "0750"
+  loop:
+    - dnssd
+    - snmp
+  ignore_errors: yes
 
 - name: Enable and start CUPS
   systemd:
@@ -25,10 +25,19 @@
     state: started
     enabled: yes
 
+- name: Disable cups-browsed (gateway manages printers directly)
+  systemd:
+    name: cups-browsed
+    state: stopped
+    enabled: no
+    masked: yes
+  ignore_errors: yes
+
 - name: Allow remote admin (optional)
   command: cupsctl --remote-admin --remote-any --share-printers
   changed_when: false
 
 - name: Set default print options (disable duplex)
-  command: lpoptions -p mp-brother -o sides=one-sided -o media=A4
+  command: lpoptions -p {{ PRINTER_NAME }} -o sides=one-sided -o media=A4
   become: yes
+  when: PRINTER_NAME is defined and PRINTER_NAME != "" and PRINTER_NAME != "DryRun"
