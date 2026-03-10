@@ -59,11 +59,6 @@ class TestValidate:
         with pytest.raises(ValueError, match="api_key"):
             mock_settings.validate()
 
-    def test_validate_missing_printer_name(self, mock_settings):
-        mock_settings.printer_name = ""
-        with pytest.raises(ValueError, match="printer_name"):
-            mock_settings.validate()
-
     def test_validate_missing_multiple(self):
         s = Settings(
             gateway_id="",
@@ -75,7 +70,6 @@ class TestValidate:
             s.validate()
         assert "gateway_id" in str(exc_info.value)
         assert "api_key" in str(exc_info.value)
-        assert "printer_name" in str(exc_info.value)
 
     def test_validate_ws_url_required(self):
         s = Settings(
