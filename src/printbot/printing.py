@@ -423,6 +423,77 @@ def set_default_printer(printer_name: str) -> None:
     logger.info("Default printer set to '%s'", printer_name)
 
 
+def get_printer_options(printer_name: str) -> dict:
+    """Get printer options with current values and choices via lpoptions -l.
+
+    Returns dict of {option_name: {"current": str, "choices": list[str]}}.
+    """
+    logger.info("Getting printer options for '%s'", printer_name)
+    try:
+        result = subprocess.run(
+            ["lpoptions", "-p", printer_name, "-l"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpoptions not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("lpoptions timed out after 15 seconds")
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"lpoptions exited with code {result.returncode}"
+        raise RuntimeError(f"Failed to get printer options: {error_msg}")
+
+    options = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or "/" not in line or ":" not in line:
+            continue
+        # Format: optionName/Label: choice1 *defaultChoice choice2
+        option_name = line.split("/", 1)[0]
+        choices_part = line.split(":", 1)[1].strip()
+        choices = []
+        current = ""
+        for token in choices_part.split():
+            if token.startswith("*"):
+                value = token[1:]
+                current = value
+                choices.append(value)
+            else:
+                choices.append(token)
+        options[option_name] = {"current": current, "choices": choices}
+
+    logger.info("Got %d option(s) for printer '%s'", len(options), printer_name)
+    return options
+
+
+def set_printer_options(printer_name: str, options: dict) -> None:
+    """Set CUPS printer options via lpadmin -o.
+
+    Args:
+        printer_name: CUPS queue name
+        options: Dict of option_name -> value, e.g. {"InputSlot": "Tray1"}
+    """
+    cmd = ["lpadmin", "-p", printer_name]
+    for key, value in options.items():
+        cmd.extend(["-o", f"{key}={value}"])
+
+    logger.info("Setting printer options for '%s': %s", printer_name, options)
+    logger.debug("lpadmin command: %s", cmd)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise RuntimeError("CUPS is not installed (lpadmin not found)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("lpadmin timed out after 30 seconds")
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"lpadmin exited with code {result.returncode}"
+        raise RuntimeError(f"Failed to set printer options: {error_msg}")
+
+    logger.info("Printer options set successfully for '%s'", printer_name)
+
+
 def get_printer_status(printer_name: str) -> str:
     """Get printer status via lpstat. Returns 'idle', 'printing', or 'unknown'."""
     try:

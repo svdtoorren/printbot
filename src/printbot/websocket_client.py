@@ -14,10 +14,12 @@ from .ota_updater import perform_ota_update, request_restart
 from .printing import (
     add_printer,
     discover_devices,
+    get_printer_options,
     get_printer_status,
     list_printers,
     remove_printer,
     set_default_printer,
+    set_printer_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,6 +133,12 @@ class GatewayClient:
 
         elif msg_type == "cups_set_default":
             asyncio.create_task(self._handle_cups_set_default(msg))
+
+        elif msg_type == "cups_get_printer_options":
+            asyncio.create_task(self._handle_cups_get_printer_options(msg))
+
+        elif msg_type == "cups_set_printer_options":
+            asyncio.create_task(self._handle_cups_set_printer_options(msg))
 
         elif msg_type == "ota_update":
             url = msg.get("url", "")
@@ -298,6 +306,61 @@ class GatewayClient:
             })
         except Exception as e:
             logger.exception("cups_set_default failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_get_printer_options(self, msg: dict):
+        """Get CUPS printer options and send the result back."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_get_printer_options request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            options = await asyncio.to_thread(get_printer_options, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": options,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_get_printer_options failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_set_printer_options(self, msg: dict):
+        """Set CUPS printer options and send the result back."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        options = msg.get("options", {})
+        logger.info(
+            "cups_set_printer_options request (request_id=%s, name=%s, options=%s)",
+            request_id, printer_name, options,
+        )
+        try:
+            await asyncio.to_thread(set_printer_options, printer_name, options)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_set_printer_options failed: %s", e)
             await self._send({
                 "type": "cups_response",
                 "request_id": request_id,
