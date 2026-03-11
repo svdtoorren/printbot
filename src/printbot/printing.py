@@ -54,6 +54,36 @@ def print_raw(
                 pass
 
 
+def _parse_lpoptions_output(output: str) -> dict[str, str]:
+    """Parse ``lpoptions -p <printer>`` output into a dict.
+
+    The output format is space-separated key=value pairs where values
+    containing spaces are single-quoted: ``key1=val1 key2='long value'``.
+    """
+    opts: dict[str, str] = {}
+    for token in shlex.split(output):
+        if "=" in token:
+            k, v = token.split("=", 1)
+            opts[k] = v
+    return opts
+
+
+def get_printer_defaults(printer_name: str) -> dict[str, str]:
+    """Read current CUPS defaults for a printer via lpoptions."""
+    try:
+        result = subprocess.run(
+            ["lpoptions", "-p", printer_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            logger.debug("lpoptions -p %s failed (exit %d)", printer_name, result.returncode)
+            return {}
+        return _parse_lpoptions_output(result.stdout)
+    except Exception as e:
+        logger.debug("Failed to read printer defaults for '%s': %s", printer_name, e)
+        return {}
+
+
 def print_pdf(
     printer_name: str,
     title: str,
@@ -62,6 +92,7 @@ def print_pdf(
     copies: int = 1,
     duplex: bool = False,
     dry_run: bool = False,
+    printer_options: dict[str, str] | None = None,
 ) -> None:
     """Print PDF file to CUPS printer.
 
@@ -73,6 +104,7 @@ def print_pdf(
         copies: Number of copies to print
         duplex: If True, enable two-sided printing
         dry_run: If True, simulate printing without actual CUPS command
+        printer_options: Extra CUPS options that override printer defaults
     """
     if dry_run:
         logger.info("[DRY_RUN] Would print PDF to '%s': %s (copies=%d, duplex=%s)", printer_name, title, copies, duplex)
@@ -83,17 +115,26 @@ def print_pdf(
                 pass
         return
 
+    # Build merged options: CUPS defaults -> server overrides -> hardcoded fallbacks
+    defaults = get_printer_defaults(printer_name) if printer_name.strip() else {}
+    merged = dict(defaults)
+    if printer_options:
+        merged.update(printer_options)
+    # Hardcoded fallbacks only if not already set
+    merged.setdefault("media", "A4")
+    merged.setdefault("orientation-requested", "3")
+    if duplex:
+        merged["sides"] = "two-sided-long-edge"
+
     cmd_parts = ["lp"]
     if printer_name.strip():
         cmd_parts.extend(["-d", shlex.quote(printer_name)])
+    for key, value in merged.items():
+        cmd_parts.extend(["-o", f"{shlex.quote(key)}={shlex.quote(value)}"])
     cmd_parts.extend([
-        "-o", "media=A4",
-        "-o", "orientation-requested=3",
         "-n", str(copies),
         "-t", shlex.quote(title),
     ])
-    if duplex:
-        cmd_parts.extend(["-o", "sides=two-sided-long-edge"])
 
     cmd_parts.append(shlex.quote(pdf_path))
     cmd = " ".join(cmd_parts)

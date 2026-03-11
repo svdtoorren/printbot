@@ -106,6 +106,7 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
     elif payload_type == "pdf":
         copies = metadata.get("copies", 1)
         duplex = metadata.get("duplex", False)
+        printer_options = metadata.get("printer_options")
 
         fd, pdf_path = tempfile.mkstemp(prefix="printbot_", suffix=".pdf")
         try:
@@ -123,6 +124,7 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
                 copies=copies,
                 duplex=duplex,
                 dry_run=dry_run,
+                printer_options=printer_options,
             )
 
             _mark_printed(db_path, job_id)
