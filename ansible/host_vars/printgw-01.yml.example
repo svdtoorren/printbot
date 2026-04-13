@@ -1,4 +1,43 @@
 GATEWAY_ID: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 API_KEY: "pgw_CHANGEME"
-PRINTER_NAME: "YourPrinterName"
+
+# Legacy single-printer setting (kept for backward compatibility).
+# Leave blank when PRINTER_QUEUES is used; the default queue name from
+# PRINTER_QUEUES (the entry with is_default: true) is written to the
+# PRINTER_NAME env variable automatically.
+PRINTER_NAME: ""
+
+# Dual-tray setup: same physical printer (RICOH MP C307 at 10.5.24.69)
+# exposed as two CUPS queues with different default trays. Both queues
+# default to black & white (ColorModel: Gray).
+#
+# IMPORTANT: verify the actual InputSlot / ColorModel value names after
+# first deployment with:
+#     lpoptions -p standaard -l | grep -iE "input|color"
+# Values below are the common RICOH naming; adjust if your PPD differs.
+PRINTER_QUEUES:
+  - name: "standaard"
+    device_uri: "ipp://10.5.24.69/printer"
+    model: "everywhere"
+    description: "Standaard papier (Lade 1)"
+    location: "Kantoor"
+    is_default: true
+    options:
+      InputSlot: "Tray1"
+      ColorModel: "Gray"
+      media: "A4"
+      sides: "one-sided"
+
+  - name: "briefpapier"
+    device_uri: "ipp://10.5.24.69/printer"
+    model: "everywhere"
+    description: "Briefpapier (Lade 2)"
+    location: "Kantoor"
+    is_default: false
+    options:
+      InputSlot: "Tray2"
+      ColorModel: "Gray"
+      media: "A4"
+      sides: "one-sided"
+
 DRY_RUN: "false"

@@ -73,6 +73,78 @@ class TestJobHandler(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("CUPS error", result["error"])
 
+    @patch("printbot.job_handler.list_printers")
+    @patch("printbot.job_handler.print_pdf")
+    def test_unknown_target_printer_preflight(self, mock_print, mock_list):
+        """Unknown target_printer should fail fast with `unknown_printer` error."""
+        mock_list.return_value = [
+            {"name": "standaard"}, {"name": "briefpapier"},
+        ]
+        job = self._make_job(job_id="unknown-001")
+        job["metadata"]["target_printer"] = "does-not-exist"
+
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], "unknown_printer")
+        self.assertIn("does-not-exist", result["details"])
+        mock_print.assert_not_called()
+
+    @patch("printbot.job_handler.list_printers")
+    @patch("printbot.job_handler.print_pdf")
+    def test_known_target_printer_proceeds(self, mock_print, mock_list):
+        """Known target_printer should pass pre-flight and invoke print_pdf."""
+        mock_list.return_value = [
+            {"name": "standaard"}, {"name": "briefpapier"},
+        ]
+        job = self._make_job(job_id="known-001")
+        job["metadata"]["target_printer"] = "briefpapier"
+
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        self.assertEqual(result["status"], "completed")
+        mock_print.assert_called_once()
+        # Confirm print_pdf was called with the target_printer, not the default
+        kwargs = mock_print.call_args.kwargs
+        self.assertEqual(kwargs.get("printer_name"), "briefpapier")
+
+    @patch("printbot.job_handler.list_printers")
+    @patch("printbot.job_handler.print_pdf")
+    def test_no_target_printer_skips_preflight(self, mock_print, mock_list):
+        """Jobs without explicit target_printer should not call list_printers."""
+        job = self._make_job(job_id="default-001")
+        # No target_printer in metadata
+
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        self.assertEqual(result["status"], "completed")
+        mock_list.assert_not_called()
+
+    @patch("printbot.job_handler.list_printers")
+    @patch("printbot.job_handler.print_pdf")
+    def test_dry_run_skips_preflight(self, mock_print, mock_list):
+        """In dry_run mode the pre-flight check should be skipped."""
+        job = self._make_job(job_id="dry-001")
+        job["metadata"]["target_printer"] = "whatever"
+
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=True)
+
+        self.assertEqual(result["status"], "completed")
+        mock_list.assert_not_called()
+
+    @patch("printbot.job_handler.list_printers", side_effect=RuntimeError("cups down"))
+    @patch("printbot.job_handler.print_pdf")
+    def test_preflight_failure_does_not_block(self, mock_print, mock_list):
+        """If list_printers fails, pre-flight should not reject the job."""
+        job = self._make_job(job_id="list-fail-001")
+        job["metadata"]["target_printer"] = "briefpapier"
+
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        # When list_printers fails we cannot validate, so we fall through to lp
+        self.assertEqual(result["status"], "completed")
+        mock_print.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

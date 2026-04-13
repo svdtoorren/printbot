@@ -13,6 +13,7 @@ def mock_settings():
         api_key="test-api-key-abc123",
         ws_url="ws://localhost:8000/ws/gateway",
         printer_name="test-printer",
+        printer_queues=[],
         state_dir="/tmp/printbot-test",
         heartbeat_interval=5,
         reconnect_delay=1,

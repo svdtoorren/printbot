@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 from datetime import datetime, timezone
 
-from .printing import print_pdf, print_raw
+from .printing import list_printers, print_pdf, print_raw
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,29 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
         return {"status": "completed"}
 
     title = metadata.get("title", f"Job {job_id[:8]}")
-    effective_printer = metadata.get("target_printer") or printer_name
+    target_printer = metadata.get("target_printer")
+    effective_printer = target_printer or printer_name
+
+    # Pre-flight check: if server explicitly specified a target_printer,
+    # verify it exists on this gateway before invoking lp. This returns a
+    # stable "unknown_printer" error that the admin UI can surface cleanly,
+    # instead of relying on the raw CUPS error message.
+    if target_printer and not dry_run:
+        try:
+            known = {p.get("name", "") for p in list_printers()}
+        except Exception as e:
+            logger.warning("Could not list printers for pre-flight check: %s", e)
+            known = set()
+        if known and target_printer not in known:
+            logger.error(
+                "Job %s: target_printer '%s' not found on gateway (known=%s)",
+                job_id, target_printer, sorted(known),
+            )
+            return {
+                "status": "failed",
+                "error": "unknown_printer",
+                "details": f"Queue '{target_printer}' not found on gateway",
+            }
 
     if payload_type == "raw":
         if not effective_printer.strip():

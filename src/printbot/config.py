@@ -1,6 +1,11 @@
 import os
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _parse_printer_queues(raw: str) -> list[str]:
+    """Parse comma-separated PRINTER_QUEUES env variable into a list."""
+    return [q.strip() for q in raw.split(",") if q.strip()]
 
 # Track which .env file was loaded
 _loaded_env_path: Path | None = None
@@ -27,6 +32,7 @@ _ENV_KEY_MAP = {
     "api_key": "API_KEY",
     "ws_url": "WS_URL",
     "printer_name": "PRINTER_NAME",
+    "printer_queues": "PRINTER_QUEUES",
     "state_dir": "STATE_DIR",
     "heartbeat_interval": "HEARTBEAT_INTERVAL",
     "reconnect_delay": "RECONNECT_DELAY",
@@ -42,6 +48,9 @@ class Settings:
     api_key: str = os.getenv("API_KEY", "")
     ws_url: str = os.getenv("WS_URL", "wss://printgateway.toorren.nl/ws/gateway")
     printer_name: str = os.getenv("PRINTER_NAME", "")
+    printer_queues: list[str] = field(
+        default_factory=lambda: _parse_printer_queues(os.getenv("PRINTER_QUEUES", ""))
+    )
     state_dir: str = os.getenv("STATE_DIR", "/var/lib/printbot")
     heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
     reconnect_delay: int = int(os.getenv("RECONNECT_DELAY", "5"))
@@ -79,6 +88,8 @@ class Settings:
             val = getattr(self, field_name)
             if isinstance(val, bool):
                 values[env_key] = "true" if val else "false"
+            elif isinstance(val, list):
+                values[env_key] = ",".join(str(v) for v in val)
             else:
                 values[env_key] = str(val)
 

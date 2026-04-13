@@ -5,6 +5,7 @@
       - avahi-daemon
       - avahi-utils
       - ipp-usb
+      - openprinting-ppds
     state: present
     update_cache: yes
 
@@ -33,11 +34,58 @@
     masked: yes
   ignore_errors: yes
 
-- name: Allow remote admin (optional)
+- name: Allow remote admin and enable printer sharing
   command: cupsctl --remote-admin --remote-any --share-printers
   changed_when: false
 
-- name: Set default print options (disable duplex)
+# --- Multi-queue configuration (new, data-driven via PRINTER_QUEUES) ---
+
+- name: Add CUPS printer queues
+  command: >-
+    lpadmin
+    -p {{ item.name }}
+    -v {{ item.device_uri }}
+    -m {{ item.model | default('everywhere') }}
+    -D "{{ item.description | default('') }}"
+    -L "{{ item.location | default('') }}"
+    -E
+    -o printer-is-shared=true
+  loop: "{{ PRINTER_QUEUES }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: PRINTER_QUEUES is defined and PRINTER_QUEUES | length > 0
+  changed_when: false
+
+- name: Set default options per CUPS queue
+  shell: >-
+    lpadmin -p {{ item.name | quote }}
+    {% for key, value in (item.options | default({})).items() %}
+    -o {{ key | quote }}={{ value | quote }}
+    {% endfor %}
+  loop: "{{ PRINTER_QUEUES }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - PRINTER_QUEUES is defined
+    - PRINTER_QUEUES | length > 0
+    - (item.options | default({})) | length > 0
+  changed_when: false
+
+- name: Set default CUPS printer (from PRINTER_QUEUES)
+  command: "lpadmin -d {{ item.name }}"
+  loop: "{{ PRINTER_QUEUES | selectattr('is_default', 'defined') | selectattr('is_default') | list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: PRINTER_QUEUES is defined and PRINTER_QUEUES | length > 0
+  changed_when: false
+
+# --- Legacy single-printer fallback (used when PRINTER_QUEUES is not set) ---
+
+- name: Set default print options (single printer - legacy)
   command: lpoptions -p {{ PRINTER_NAME }} -o sides=one-sided -o media=A4
-  become: yes
-  when: PRINTER_NAME is defined and PRINTER_NAME != "" and PRINTER_NAME != "DryRun"
+  when:
+    - PRINTER_QUEUES is not defined or PRINTER_QUEUES | length == 0
+    - PRINTER_NAME is defined
+    - PRINTER_NAME != ""
+    - PRINTER_NAME != "DryRun"
+  changed_when: false

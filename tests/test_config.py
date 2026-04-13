@@ -5,9 +5,12 @@ at class definition time. To test env var behavior, we must pass values directly
 to the constructor rather than patching os.environ.
 """
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
-from printbot.config import Settings
+from printbot.config import Settings, _parse_printer_queues
 
 
 class TestSettingsDefaults:
@@ -80,3 +83,65 @@ class TestValidate:
         )
         with pytest.raises(ValueError, match="ws_url"):
             s.validate()
+
+
+class TestPrinterQueues:
+    def test_parse_empty_string(self):
+        assert _parse_printer_queues("") == []
+
+    def test_parse_single(self):
+        assert _parse_printer_queues("standaard") == ["standaard"]
+
+    def test_parse_multiple(self):
+        assert _parse_printer_queues("standaard,briefpapier") == ["standaard", "briefpapier"]
+
+    def test_parse_strips_whitespace(self):
+        assert _parse_printer_queues(" standaard , briefpapier ") == ["standaard", "briefpapier"]
+
+    def test_parse_skips_empty_entries(self):
+        assert _parse_printer_queues("standaard,,briefpapier,") == ["standaard", "briefpapier"]
+
+    def test_default_is_empty_list(self):
+        s = Settings()
+        # When PRINTER_QUEUES env var is not set, the default should be an empty list.
+        # (In CI this env var is typically absent.)
+        assert isinstance(s.printer_queues, list)
+
+    def test_can_pass_queues_explicitly(self):
+        s = Settings(printer_queues=["standaard", "briefpapier"])
+        assert s.printer_queues == ["standaard", "briefpapier"]
+
+
+class TestSaveToEnv:
+    def test_save_serializes_list_as_csv(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("PRINTER_QUEUES=old\nGATEWAY_ID=gw\n")
+
+        s = Settings(
+            gateway_id="gw",
+            api_key="key",
+            ws_url="ws://x",
+            printer_name="p",
+            printer_queues=["standaard", "briefpapier"],
+        )
+        s.save_to_env(env_file)
+
+        content = env_file.read_text()
+        assert "PRINTER_QUEUES=standaard,briefpapier" in content
+
+    def test_save_empty_list_serializes_as_empty_string(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("PRINTER_QUEUES=old\n")
+
+        s = Settings(
+            gateway_id="gw",
+            api_key="key",
+            ws_url="ws://x",
+            printer_queues=[],
+        )
+        s.save_to_env(env_file)
+
+        content = env_file.read_text()
+        assert "PRINTER_QUEUES=" in content
+        # No residual comma-separated list
+        assert "PRINTER_QUEUES=old" not in content

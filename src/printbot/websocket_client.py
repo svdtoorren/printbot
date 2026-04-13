@@ -452,10 +452,23 @@ class GatewayClient:
         await self._send(msg)
 
     async def _heartbeat_loop(self):
-        """Send periodic heartbeats."""
+        """Send periodic heartbeats.
+
+        Sends both the legacy scalar ``printer_status`` (status of the default
+        queue, for backward compatibility) and a ``printer_statuses`` dict with
+        per-queue status when ``PRINTER_QUEUES`` is configured. Status values
+        are CUPS-native: ``idle | printing | disabled | unknown``.
+        """
         while True:
             try:
+                # Scalar status = status of the default (legacy) printer
                 printer_status = get_printer_status(self.settings.printer_name)
+
+                # Per-queue statuses (new). Empty dict when no queues configured.
+                printer_statuses: dict[str, str] = {}
+                for queue_name in self.settings.printer_queues:
+                    printer_statuses[queue_name] = get_printer_status(queue_name)
+
                 uptime = int(time.monotonic() - self._start_time)
 
                 await self._send({
@@ -463,16 +476,21 @@ class GatewayClient:
                     "gateway_id": self.settings.gateway_id,
                     "version": __version__,
                     "printer_status": printer_status,
+                    "printer_statuses": printer_statuses,
                     "uptime": uptime,
                     "local_ip": _get_local_ip(),
                     "config": {
                         "printer_name": self.settings.printer_name,
+                        "printer_queues": self.settings.printer_queues,
                         "dry_run": self.settings.dry_run,
                         "log_level": self.settings.log_level,
                         "heartbeat_interval": self.settings.heartbeat_interval,
                     },
                 })
-                logger.debug("Heartbeat sent (printer=%s, uptime=%ds)", printer_status, uptime)
+                logger.debug(
+                    "Heartbeat sent (printer=%s, queues=%d, uptime=%ds)",
+                    printer_status, len(printer_statuses), uptime,
+                )
             except Exception as e:
                 logger.error("Heartbeat error: %s", e)
 
