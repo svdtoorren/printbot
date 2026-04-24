@@ -536,7 +536,7 @@ def set_printer_options(printer_name: str, options: dict) -> None:
 
 
 def get_printer_status(printer_name: str) -> str:
-    """Get printer status via lpstat. Returns 'idle', 'printing', or 'unknown'."""
+    """Get printer status via lpstat. Returns 'idle', 'printing', 'disabled', or 'unknown'."""
     try:
         result = subprocess.run(
             ["lpstat", "-p", printer_name],
@@ -552,3 +552,287 @@ def get_printer_status(printer_name: str) -> str:
         return "unknown"
     except Exception:
         return "unknown"
+
+
+# --- CUPS queue control + diagnostics -------------------------------------
+
+# Force C locale for lpstat parsing — CUPS formats timestamps using LC_TIME,
+# so without this the parsing would break under non-English system locales.
+def _c_locale_env() -> dict:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    env["LANG"] = "C"
+    return env
+
+
+def _run_admin(cmd: list[str], description: str, timeout: int = 30) -> None:
+    """Run a CUPS admin command and raise RuntimeError with stderr on failure."""
+    logger.info("%s: %s", description, " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"CUPS command not found: {cmd[0]}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"{cmd[0]} timed out after {timeout} seconds") from e
+
+    if result.returncode != 0:
+        error_msg = result.stderr.strip() or f"{cmd[0]} exited with code {result.returncode}"
+        raise RuntimeError(f"{description} failed: {error_msg}")
+
+
+def enable_printer(printer_name: str) -> None:
+    """Enable (resume) a CUPS print queue via cupsenable."""
+    _run_admin(["cupsenable", printer_name], f"Enable printer '{printer_name}'")
+
+
+def disable_printer(printer_name: str, reason: str = "") -> None:
+    """Disable (stop) a CUPS print queue via cupsdisable, optional reason."""
+    cmd = ["cupsdisable"]
+    if reason:
+        cmd.extend(["-r", reason])
+    cmd.append(printer_name)
+    _run_admin(cmd, f"Disable printer '{printer_name}'")
+
+
+def accept_jobs(printer_name: str) -> None:
+    """Configure a CUPS queue to accept new jobs via cupsaccept."""
+    _run_admin(["cupsaccept", printer_name], f"Accept jobs on '{printer_name}'")
+
+
+def reject_jobs(printer_name: str, reason: str = "") -> None:
+    """Configure a CUPS queue to reject new jobs via cupsreject, optional reason."""
+    cmd = ["cupsreject"]
+    if reason:
+        cmd.extend(["-r", reason])
+    cmd.append(printer_name)
+    _run_admin(cmd, f"Reject jobs on '{printer_name}'")
+
+
+def cancel_job(job_id: str | int, purge: bool = False) -> None:
+    """Cancel a single CUPS job. job_id may be numeric ('42') or namespaced ('hp-42').
+
+    If purge=True, also remove the job's data files (cancel -x).
+    """
+    cmd = ["cancel"]
+    if purge:
+        cmd.append("-x")
+    cmd.append(str(job_id))
+    _run_admin(cmd, f"Cancel job '{job_id}'")
+
+
+def clear_queue(printer_name: str, purge: bool = False) -> None:
+    """Cancel every pending job on a printer (cancel -a). purge=True removes data files."""
+    cmd = ["cancel", "-a"]
+    if purge:
+        cmd.append("-x")
+    cmd.append(printer_name)
+    _run_admin(cmd, f"Clear queue '{printer_name}'")
+
+
+def _parse_state_line(line: str) -> tuple[str, str]:
+    """Map first line of ``lpstat -p`` output to (state, summary).
+
+    Examples:
+      "printer hp is idle.  enabled since ..."     -> ("idle", "is idle.  enabled since ...")
+      "printer hp now printing hp-42.  enabled..." -> ("printing", ...)
+      "printer hp disabled since ..."              -> ("stopped", ...)
+    """
+    m = re.match(r"printer\s+\S+\s+(.*)", line)
+    if not m:
+        return "unknown", ""
+    rest = m.group(1)
+    lower = rest.lower()
+    if "now printing" in lower or "processing" in lower:
+        return "printing", rest
+    if "is idle" in lower:
+        return "idle", rest
+    if "disabled" in lower or "stopped" in lower:
+        return "stopped", rest
+    return "unknown", rest
+
+
+_REASON_KEYWORDS = (
+    # Hardware state we want surfaced as machine-readable reasons even when
+    # CUPS only printed them as a free-text message.
+    "cover-open", "media-empty", "media-jam", "media-low",
+    "marker-supply-empty", "marker-supply-low",
+    "marker-waste-full", "marker-waste-almost-full",
+    "toner-empty", "toner-low",
+    "input-tray-missing", "output-tray-missing", "output-area-full",
+    "offline-report", "paused", "spool-area-full",
+    "shutdown", "timed-out", "connecting-to-device",
+    "door-open", "fuser-over-temp", "fuser-under-temp",
+    "interpreter-resource-unavailable",
+)
+
+
+def _extract_reasons(text: str) -> list[str]:
+    """Pull IPP-style state-reason tokens from a free-form text blob.
+
+    Looks for explicit ``Alerts:`` / ``reasons:`` lines and well-known keywords
+    so we surface a usable state_reasons list regardless of CUPS version.
+    """
+    reasons: list[str] = []
+    seen: set[str] = set()
+
+    def add(token: str) -> None:
+        token = token.strip().lower()
+        if not token or token == "none" or token in seen:
+            return
+        seen.add(token)
+        reasons.append(token)
+
+    # Explicit reason/alert lines (CUPS dumps them indented).
+    for label_match in re.finditer(r"(?im)^\s*(?:alerts|reasons)\s*:\s*(.+)$", text):
+        for token in re.split(r"[,\s]+", label_match.group(1)):
+            add(token)
+
+    # Well-known reason keywords appearing anywhere in the blob (with optional
+    # severity suffix). Strip the suffix when matching but keep it on the token.
+    for keyword in _REASON_KEYWORDS:
+        for match in re.finditer(
+            rf"\b{re.escape(keyword)}(?:-error|-warning|-report)?\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            add(match.group(0))
+
+    return reasons
+
+
+def get_printer_detail(printer_name: str) -> dict:
+    """Get detailed CUPS queue diagnostics for a single printer.
+
+    Returns a dict with keys:
+      - state: "idle" | "printing" | "stopped" | "unknown"
+      - state_reasons: list[str]  (IPP-style tokens, e.g. ["cover-open"])
+      - accepting_jobs: bool
+      - state_message: str  (free-text, may include reason from cupsdisable -r)
+    """
+    detail = {
+        "state": "unknown",
+        "state_reasons": [],
+        "accepting_jobs": False,
+        "state_message": "",
+    }
+
+    try:
+        p = subprocess.run(
+            ["lpstat", "-l", "-p", printer_name],
+            capture_output=True, text=True, timeout=10, env=_c_locale_env(),
+        )
+    except Exception as e:
+        logger.warning("lpstat -l -p %s failed: %s", printer_name, e)
+        return detail
+
+    lines = p.stdout.splitlines()
+    if lines:
+        first_line = lines[0].strip()
+        state, summary = _parse_state_line(first_line)
+        detail["state"] = state
+        # Indented continuation lines after the state line carry the operator
+        # message (from cupsdisable -r) and possibly Alerts/reasons output.
+        message_parts = []
+        for line in lines[1:]:
+            if line.startswith((" ", "\t")):
+                stripped = line.strip()
+                if stripped and not stripped.startswith(("Description:", "Location:", "Connection:", "Interface:")):
+                    message_parts.append(stripped)
+            else:
+                # Stop at the next non-indented block (defensive — shouldn't happen
+                # for single-printer lpstat).
+                break
+        detail["state_message"] = " ".join(message_parts).strip()
+        detail["state_reasons"] = _extract_reasons(p.stdout + " " + summary)
+
+    try:
+        a = subprocess.run(
+            ["lpstat", "-a", printer_name],
+            capture_output=True, text=True, timeout=10, env=_c_locale_env(),
+        )
+        detail["accepting_jobs"] = "not accepting" not in a.stdout.lower() and bool(a.stdout.strip())
+    except Exception as e:
+        logger.warning("lpstat -a %s failed: %s", printer_name, e)
+
+    return detail
+
+
+# Format under LC_ALL=C: "Mon Apr 24 10:00:00 2026" (asctime).
+_LPSTAT_DATE_FMT = "%a %b %d %H:%M:%S %Y"
+
+
+def _parse_lpstat_date(text: str) -> Optional[float]:
+    """Parse the trailing date from an lpstat -o line into an epoch float, or None."""
+    import time as _time
+    text = text.strip()
+    try:
+        return _time.mktime(_time.strptime(text, _LPSTAT_DATE_FMT))
+    except (ValueError, OverflowError):
+        return None
+
+
+def list_jobs(printer_name: str) -> list[dict]:
+    """List pending+active jobs on a printer via ``lpstat -W not-completed -o``.
+
+    Returns a list of dicts (preserving queue order) with keys:
+      - job_id: int          (e.g. 42)
+      - job_name: str        (e.g. "hp-42")
+      - printer_name: str
+      - user: str
+      - size_bytes: int
+      - submitted_at: str    (ISO 8601 local time, "" if parse failed)
+      - age_seconds: int     (-1 if parse failed)
+    """
+    import time as _time
+    jobs: list[dict] = []
+    try:
+        result = subprocess.run(
+            ["lpstat", "-W", "not-completed", "-o", printer_name],
+            capture_output=True, text=True, timeout=10, env=_c_locale_env(),
+        )
+    except Exception as e:
+        logger.warning("lpstat -o %s failed: %s", printer_name, e)
+        return jobs
+
+    if result.returncode != 0:
+        # Empty queue gives returncode 0 with empty stdout, so a non-zero exit
+        # is a real error (unknown printer, cupsd unreachable).
+        logger.debug("lpstat -o %s exited %d: %s",
+                     printer_name, result.returncode, result.stderr.strip())
+        return jobs
+
+    now = _time.time()
+    # Format: "<dest>-<id>  <user>  <size>  <weekday> <mon> <day> HH:MM:SS YYYY"
+    pattern = re.compile(
+        r"^(?P<jobname>\S+?)-(?P<job_id>\d+)\s+"
+        r"(?P<user>\S+)\s+"
+        r"(?P<size>\d+)\s+"
+        r"(?P<date>.+?)\s*$"
+    )
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        m = pattern.match(line)
+        if not m:
+            logger.debug("Skipping unparseable lpstat -o line: %r", line)
+            continue
+        epoch = _parse_lpstat_date(m.group("date"))
+        if epoch is not None:
+            submitted_iso = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(epoch))
+            age = max(0, int(now - epoch))
+        else:
+            submitted_iso = ""
+            age = -1
+        jobs.append({
+            "job_id": int(m.group("job_id")),
+            "job_name": f"{m.group('jobname')}-{m.group('job_id')}",
+            "printer_name": m.group("jobname"),
+            "user": m.group("user"),
+            "size_bytes": int(m.group("size")),
+            "submitted_at": submitted_iso,
+            "age_seconds": age,
+        })
+
+    logger.info("Listed %d pending job(s) on '%s'", len(jobs), printer_name)
+    return jobs
