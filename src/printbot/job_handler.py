@@ -86,7 +86,7 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
             with os.fdopen(fd, "wb") as f:
                 f.write(raw_bytes)
             logger.info("Job %s: raw print to '%s' (%d bytes)", job_id, effective_printer, len(raw_bytes))
-            print_raw(
+            cups_job_id = print_raw(
                 printer_name=effective_printer,
                 title=title,
                 file_path=file_path,
@@ -94,7 +94,7 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
                 dry_run=dry_run,
             )
             _mark_printed(db_path, job_id)
-            return {"status": "completed"}
+            return {"status": "completed", "cups_job_id": cups_job_id}
         except Exception as e:
             logger.exception("Job %s failed: %s", job_id, e)
             try:
@@ -116,7 +116,7 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
 
             logger.info("Job %s: printing '%s' (%d bytes, copies=%d, duplex=%s)", job_id, title, len(pdf_bytes), copies, duplex)
 
-            print_pdf(
+            cups_job_id = print_pdf(
                 printer_name=effective_printer,
                 title=title,
                 pdf_path=pdf_path,
@@ -128,8 +128,8 @@ def handle_print_job(job: dict, printer_name: str, state_dir: str, dry_run: bool
             )
 
             _mark_printed(db_path, job_id)
-            logger.info("Job %s completed", job_id)
-            return {"status": "completed"}
+            logger.info("Job %s completed (cups_job_id=%s)", job_id, cups_job_id)
+            return {"status": "completed", "cups_job_id": cups_job_id}
 
         except Exception as e:
             logger.exception("Job %s failed: %s", job_id, e)

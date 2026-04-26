@@ -8,14 +8,36 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _parse_lp_request_id(stdout: str) -> Optional[int]:
+    """Extract the CUPS job-id from ``lp`` stdout under LC_ALL=C.
+
+    Format is always ``request id is <queue>-<id> (<n> file(s))`` —
+    deterministic in the C locale. Returns None if the line is absent or
+    malformed (caller logs a warning and continues; we never crash on a
+    missing id).
+    """
+    if not stdout:
+        return None
+    m = re.search(r"request id is \S+-(\d+)\b", stdout)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (ValueError, OverflowError):
+        return None
+
+
 def print_raw(
     printer_name: str,
     title: str,
     file_path: str,
     cleanup: bool = True,
     dry_run: bool = False,
-) -> None:
-    """Send raw data to CUPS printer (e.g. label printer commands)."""
+) -> Optional[int]:
+    """Send raw data to CUPS printer. Returns the assigned CUPS job-id, or None.
+
+    None covers dry-run, parse failure, and the (unreachable) success-without-output case.
+    """
     if dry_run:
         logger.info("[DRY_RUN] Would send raw data to '%s': %s", printer_name, title)
         if cleanup:
@@ -23,7 +45,7 @@ def print_raw(
                 os.remove(file_path)
             except OSError:
                 pass
-        return
+        return None
 
     cmd_parts = ["lp", "-o", "raw"]
     if printer_name.strip():
@@ -35,9 +57,19 @@ def print_raw(
     logger.info("Sending raw print job to CUPS queue '%s': %s", printer_name, title)
     logger.debug("CUPS command: %s", cmd)
 
+    cups_job_id: Optional[int] = None
     try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=30)
-        logger.info("Raw print job submitted to CUPS")
+        # LC_ALL=C so "request id is …" stays in English regardless of host locale.
+        result = subprocess.run(
+            cmd, shell=True, check=True, capture_output=True, text=True,
+            timeout=30, env=_c_locale_env(),
+        )
+        cups_job_id = _parse_lp_request_id(result.stdout)
+        if cups_job_id is not None:
+            logger.info("Raw print job submitted to CUPS as job-id %d", cups_job_id)
+        else:
+            logger.warning("Could not parse CUPS job-id from lp output: %r",
+                           (result.stdout or "").strip())
         if result.stdout:
             logger.debug("CUPS output: %s", result.stdout.strip())
     except subprocess.CalledProcessError as e:
@@ -52,6 +84,8 @@ def print_raw(
                 os.remove(file_path)
             except OSError:
                 pass
+
+    return cups_job_id
 
 
 def _parse_lpoptions_output(output: str) -> dict[str, str]:
@@ -93,8 +127,8 @@ def print_pdf(
     duplex: bool = False,
     dry_run: bool = False,
     printer_options: dict[str, str] | None = None,
-) -> None:
-    """Print PDF file to CUPS printer.
+) -> Optional[int]:
+    """Print PDF file to CUPS printer. Returns the assigned CUPS job-id, or None.
 
     Args:
         printer_name: Name of the CUPS printer
@@ -113,7 +147,7 @@ def print_pdf(
                 os.remove(pdf_path)
             except OSError:
                 pass
-        return
+        return None
 
     # Build merged options: CUPS defaults -> server overrides -> hardcoded fallbacks
     defaults = get_printer_defaults(printer_name) if printer_name.strip() else {}
@@ -142,9 +176,19 @@ def print_pdf(
     logger.info("Sending print job to CUPS: %s (copies=%d, duplex=%s)", title, copies, duplex)
     logger.debug("CUPS command: %s", cmd)
 
+    cups_job_id: Optional[int] = None
     try:
-        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, timeout=30)
-        logger.info("Print job submitted to CUPS")
+        # LC_ALL=C so "request id is …" stays in English regardless of host locale.
+        result = subprocess.run(
+            cmd, shell=True, check=True, capture_output=True, text=True,
+            timeout=30, env=_c_locale_env(),
+        )
+        cups_job_id = _parse_lp_request_id(result.stdout)
+        if cups_job_id is not None:
+            logger.info("Print job submitted to CUPS as job-id %d", cups_job_id)
+        else:
+            logger.warning("Could not parse CUPS job-id from lp output: %r",
+                           (result.stdout or "").strip())
         if result.stdout:
             logger.debug("CUPS output: %s", result.stdout.strip())
     except subprocess.CalledProcessError as e:
@@ -159,6 +203,8 @@ def print_pdf(
                 os.remove(pdf_path)
             except OSError:
                 pass
+
+    return cups_job_id
 
 
 def _parse_backend_output(stdout: str) -> list[dict]:

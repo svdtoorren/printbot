@@ -15,8 +15,10 @@ from printbot.printing import (
     get_printer_status,
     list_jobs,
     print_pdf,
+    print_raw,
     reject_jobs,
     _extract_reasons,
+    _parse_lp_request_id,
     _parse_state_line,
 )
 
@@ -388,6 +390,104 @@ class TestListJobs(unittest.TestCase):
         self.assertNotIn("time-at-creation", jobs[0])
         # Other fields still present.
         self.assertEqual(jobs[0]["job-id"], 42)
+
+
+class TestParseLpRequestId(unittest.TestCase):
+    """Parse the CUPS job-id out of `lp` stdout (print-verification fase 0)."""
+
+    def test_standard_output(self):
+        self.assertEqual(
+            _parse_lp_request_id("request id is HP-Printer-142 (1 file(s))\n"),
+            142,
+        )
+
+    def test_simple_queue_name(self):
+        self.assertEqual(
+            _parse_lp_request_id("request id is hp-7 (1 file(s))"),
+            7,
+        )
+
+    def test_queue_name_with_multiple_dashes(self):
+        # The id is always the trailing integer; queue name may contain dashes.
+        self.assertEqual(
+            _parse_lp_request_id("request id is brother-laser-mfc-9000-99 (1 file(s))"),
+            99,
+        )
+
+    def test_empty_stdout(self):
+        self.assertIsNone(_parse_lp_request_id(""))
+        self.assertIsNone(_parse_lp_request_id(None))  # type: ignore[arg-type]
+
+    def test_unrelated_stdout(self):
+        self.assertIsNone(_parse_lp_request_id("warning: printer offline"))
+
+
+class TestPrintPdfReturnsCupsJobId(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.pdf_path = tempfile.mkstemp(prefix="test_", suffix=".pdf")
+        with os.fdopen(self.fd, "wb") as f:
+            f.write(b"%PDF-1.0 test")
+
+    def tearDown(self):
+        try:
+            os.remove(self.pdf_path)
+        except OSError:
+            pass
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_parsed_id(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="request id is hp-273 (1 file(s))\n",
+            stderr="",
+        )
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        self.assertEqual(result, 273)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_none_on_unparseable_output(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="weird output", stderr="")
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        self.assertIsNone(result)
+
+    def test_dry_run_returns_none(self):
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False, dry_run=True)
+        self.assertIsNone(result)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_lp_invoked_under_c_locale(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="request id is hp-1 (1 file(s))", stderr="",
+        )
+        print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        # env kwarg must include LC_ALL=C so the regex stays stable across hosts.
+        env = mock_run.call_args.kwargs.get("env", {})
+        self.assertEqual(env.get("LC_ALL"), "C")
+
+
+class TestPrintRawReturnsCupsJobId(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.raw_path = tempfile.mkstemp(prefix="test_", suffix=".prn")
+        with os.fdopen(self.fd, "wb") as f:
+            f.write(b"raw data")
+
+    def tearDown(self):
+        try:
+            os.remove(self.raw_path)
+        except OSError:
+            pass
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_parsed_id(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="request id is label-55 (1 file(s))", stderr="",
+        )
+        result = print_raw("label", "Title", self.raw_path, cleanup=False)
+        self.assertEqual(result, 55)
+
+    def test_dry_run_returns_none(self):
+        result = print_raw("label", "Title", self.raw_path, cleanup=False, dry_run=True)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":

@@ -479,17 +479,21 @@ class GatewayClient:
             await asyncio.sleep(self.settings.heartbeat_interval)
 
     async def _process_jobs(self):
-        """Process print jobs from queue sequentially."""
+        """Process print jobs from queue sequentially.
+
+        Status sequence:
+          - received  : ack-only, before submit (cups_job_id not yet known)
+          - printing  : after lp returns, includes cups_job_id (job is in CUPS queue)
+          - completed : terminal success, includes cups_job_id
+          - failed    : terminal failure (cups_job_id may be absent if submit blew up)
+        """
         while True:
             msg = await self._job_queue.get()
             job_id = msg.get("job_id", "unknown")
 
             try:
-                # Acknowledge receipt
                 await self._send_job_status(job_id, "received")
 
-                # Process the job
-                await self._send_job_status(job_id, "printing")
                 result = await asyncio.to_thread(
                     handle_print_job,
                     msg,
@@ -498,19 +502,39 @@ class GatewayClient:
                     self.settings.dry_run,
                 )
 
-                await self._send_job_status(job_id, result["status"], result.get("error"))
+                cups_job_id = result.get("cups_job_id")
+                if result["status"] == "completed":
+                    # "printing" now means "submitted, in CUPS queue", emitted with
+                    # the parsed cups_job_id so the server has a stable key from
+                    # the first message that carries it.
+                    await self._send_job_status(job_id, "printing", cups_job_id=cups_job_id)
+                    await self._send_job_status(job_id, "completed", cups_job_id=cups_job_id)
+                else:
+                    await self._send_job_status(
+                        job_id, result["status"],
+                        error=result.get("error"),
+                        cups_job_id=cups_job_id,
+                    )
 
             except Exception as e:
                 logger.exception("Job %s failed: %s", job_id, e)
-                await self._send_job_status(job_id, "failed", str(e))
+                await self._send_job_status(job_id, "failed", error=str(e))
 
             self._job_queue.task_done()
 
-    async def _send_job_status(self, job_id: str, status: str, error: str | None = None):
+    async def _send_job_status(
+        self,
+        job_id: str,
+        status: str,
+        error: str | None = None,
+        cups_job_id: int | None = None,
+    ):
         """Send job status update to server."""
-        msg = {"type": "job_status", "job_id": job_id, "status": status}
+        msg: dict = {"type": "job_status", "job_id": job_id, "status": status}
         if error:
             msg["error"] = error
+        if cups_job_id is not None:
+            msg["cups_job_id"] = cups_job_id
         await self._send(msg)
 
     async def _send(self, msg: dict):
