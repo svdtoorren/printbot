@@ -113,6 +113,25 @@ class TestQueueAdminCommands(unittest.TestCase):
         self.assertEqual(mock_run.call_args[0][0], ["cupsdisable", "-r", "maintenance", "hp"])
 
     @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_long_reason_clipped_to_255(self, mock_run):
+        mock_run.return_value = self._ok()
+        disable_printer("hp", reason="a" * 1000)
+        sent = mock_run.call_args[0][0]
+        idx = sent.index("-r")
+        self.assertEqual(len(sent[idx + 1]), 255)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_non_latin1_replaced(self, mock_run):
+        mock_run.return_value = self._ok()
+        # Emoji + cyrillic — neither fits in latin-1, must become "?".
+        disable_printer("hp", reason="boom \U0001f525 Я")
+        sent = mock_run.call_args[0][0]
+        reason = sent[sent.index("-r") + 1]
+        self.assertNotIn("\U0001f525", reason)
+        self.assertNotIn("Я", reason)
+        self.assertIn("?", reason)
+
+    @patch("printbot.printing.subprocess.run")
     def test_accept_jobs(self, mock_run):
         mock_run.return_value = self._ok()
         accept_jobs("hp")
@@ -161,9 +180,10 @@ class TestParseStateLine(unittest.TestCase):
         self.assertEqual(state, "idle")
         self.assertIn("idle", summary)
 
-    def test_printing(self):
+    def test_processing(self):
+        # Server-aligned enum: "processing", not "printing".
         state, _ = _parse_state_line("printer hp now printing hp-42.  enabled since Mon Apr 24 10:00:00 2026")
-        self.assertEqual(state, "printing")
+        self.assertEqual(state, "processing")
 
     def test_disabled_means_stopped(self):
         state, _ = _parse_state_line("printer hp disabled since Mon Apr 24 10:00:00 2026 -")
@@ -263,6 +283,8 @@ class TestGetPrinterDetail(unittest.TestCase):
 
 
 class TestListJobs(unittest.TestCase):
+    """Server-aligned IPP-attribute kebab-case schema."""
+
     @patch("printbot.printing.subprocess.run")
     def test_empty_queue(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -275,7 +297,6 @@ class TestListJobs(unittest.TestCase):
 
     @patch("printbot.printing.subprocess.run")
     def test_parses_single_job(self, mock_run):
-        # Date in 2020 → age_seconds will be huge; we just assert it's parsed (>0).
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n",
@@ -284,13 +305,14 @@ class TestListJobs(unittest.TestCase):
         jobs = list_jobs("hp")
         self.assertEqual(len(jobs), 1)
         job = jobs[0]
-        self.assertEqual(job["job_id"], 42)
-        self.assertEqual(job["job_name"], "hp-42")
-        self.assertEqual(job["printer_name"], "hp")
-        self.assertEqual(job["user"], "alice")
-        self.assertEqual(job["size_bytes"], 12345)
-        self.assertNotEqual(job["submitted_at"], "")
-        self.assertGreater(job["age_seconds"], 0)
+        self.assertEqual(job["job-id"], 42)
+        self.assertEqual(job["job-originating-user-name"], "alice")
+        self.assertEqual(job["job-k-octets"], 12345)
+        self.assertEqual(job["job-state"], "pending")
+        self.assertIn("time-at-creation", job)
+        self.assertIsInstance(job["time-at-creation"], int)
+        # Server fallback `(untitled)` requires us to OMIT (not null) job-name.
+        self.assertNotIn("job-name", job)
 
     @patch("printbot.printing.subprocess.run")
     def test_parses_multiple_jobs_preserves_order(self, mock_run):
@@ -304,8 +326,11 @@ class TestListJobs(unittest.TestCase):
             stderr="",
         )
         jobs = list_jobs("hp")
-        self.assertEqual([j["job_id"] for j in jobs], [42, 43, 44])
-        self.assertEqual([j["user"] for j in jobs], ["alice", "bob", "carol"])
+        self.assertEqual([j["job-id"] for j in jobs], [42, 43, 44])
+        self.assertEqual(
+            [j["job-originating-user-name"] for j in jobs],
+            ["alice", "bob", "carol"],
+        )
 
     @patch("printbot.printing.subprocess.run")
     def test_handles_namespaced_printer(self, mock_run):
@@ -316,8 +341,25 @@ class TestListJobs(unittest.TestCase):
         )
         jobs = list_jobs("my-printer")
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["job_id"], 99)
-        self.assertEqual(jobs[0]["printer_name"], "my-printer")
+        self.assertEqual(jobs[0]["job-id"], 99)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_skips_indented_detail_lines(self, mock_run):
+        # `lpstat -l` adds indented "queued for hp" / size= / etc lines under
+        # each header — we must not try to parse those as new jobs.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n"
+                "        queued for hp\n"
+                "        size=12345\n"
+                "hp-43                 bob            999     Mon Jan  6 10:01:00 2020\n"
+                "\tAlerts:\n"
+            ),
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual([j["job-id"] for j in jobs], [42, 43])
 
     @patch("printbot.printing.subprocess.run")
     def test_skips_unparseable_lines(self, mock_run):
@@ -331,10 +373,11 @@ class TestListJobs(unittest.TestCase):
         )
         jobs = list_jobs("hp")
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["job_id"], 42)
+        self.assertEqual(jobs[0]["job-id"], 42)
 
     @patch("printbot.printing.subprocess.run")
-    def test_unparseable_date_marks_age_negative(self, mock_run):
+    def test_unparseable_date_omits_creation_time(self, mock_run):
+        # Per server contract: fields the CLI cannot deliver are OMITTED, not null.
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="hp-42                 alice          12345   not-a-date-at-all\n",
@@ -342,8 +385,9 @@ class TestListJobs(unittest.TestCase):
         )
         jobs = list_jobs("hp")
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["age_seconds"], -1)
-        self.assertEqual(jobs[0]["submitted_at"], "")
+        self.assertNotIn("time-at-creation", jobs[0])
+        # Other fields still present.
+        self.assertEqual(jobs[0]["job-id"], 42)
 
 
 if __name__ == "__main__":

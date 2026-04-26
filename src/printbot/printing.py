@@ -585,11 +585,23 @@ def enable_printer(printer_name: str) -> None:
     _run_admin(["cupsenable", printer_name], f"Enable printer '{printer_name}'")
 
 
+def _sanitize_reason(reason: str) -> str:
+    """Make a reason safe for ``cupsdisable -r`` / ``cupsreject -r``.
+
+    CUPS only accepts latin-1 reasons up to 255 chars; non-latin-1 codepoints
+    are replaced with ``?`` so the call doesn't crash on UTF-8 emoji etc.
+    """
+    if not reason:
+        return ""
+    sanitized = reason.encode("latin-1", errors="replace").decode("latin-1")
+    return sanitized[:255]
+
+
 def disable_printer(printer_name: str, reason: str = "") -> None:
     """Disable (stop) a CUPS print queue via cupsdisable, optional reason."""
     cmd = ["cupsdisable"]
     if reason:
-        cmd.extend(["-r", reason])
+        cmd.extend(["-r", _sanitize_reason(reason)])
     cmd.append(printer_name)
     _run_admin(cmd, f"Disable printer '{printer_name}'")
 
@@ -603,7 +615,7 @@ def reject_jobs(printer_name: str, reason: str = "") -> None:
     """Configure a CUPS queue to reject new jobs via cupsreject, optional reason."""
     cmd = ["cupsreject"]
     if reason:
-        cmd.extend(["-r", reason])
+        cmd.extend(["-r", _sanitize_reason(reason)])
     cmd.append(printer_name)
     _run_admin(cmd, f"Reject jobs on '{printer_name}'")
 
@@ -632,10 +644,7 @@ def clear_queue(printer_name: str, purge: bool = False) -> None:
 def _parse_state_line(line: str) -> tuple[str, str]:
     """Map first line of ``lpstat -p`` output to (state, summary).
 
-    Examples:
-      "printer hp is idle.  enabled since ..."     -> ("idle", "is idle.  enabled since ...")
-      "printer hp now printing hp-42.  enabled..." -> ("printing", ...)
-      "printer hp disabled since ..."              -> ("stopped", ...)
+    State enum is the IPP/server-aligned set: idle | processing | stopped | unknown.
     """
     m = re.match(r"printer\s+\S+\s+(.*)", line)
     if not m:
@@ -643,7 +652,7 @@ def _parse_state_line(line: str) -> tuple[str, str]:
     rest = m.group(1)
     lower = rest.lower()
     if "now printing" in lower or "processing" in lower:
-        return "printing", rest
+        return "processing", rest
     if "is idle" in lower:
         return "idle", rest
     if "disabled" in lower or "stopped" in lower:
@@ -772,37 +781,38 @@ def _parse_lpstat_date(text: str) -> Optional[float]:
 
 
 def list_jobs(printer_name: str) -> list[dict]:
-    """List pending+active jobs on a printer via ``lpstat -W not-completed -o``.
+    """List pending+active jobs via ``lpstat -l -W not-completed -o``.
 
-    Returns a list of dicts (preserving queue order) with keys:
-      - job_id: int          (e.g. 42)
-      - job_name: str        (e.g. "hp-42")
-      - printer_name: str
-      - user: str
-      - size_bytes: int
-      - submitted_at: str    (ISO 8601 local time, "" if parse failed)
-      - age_seconds: int     (-1 if parse failed)
+    Returns IPP-attribute kebab-case dicts in queue order (server-aligned schema):
+      - "job-id" (int, REQUIRED)
+      - "job-originating-user-name" (str)
+      - "job-k-octets" (int)              # third lpstat column is k-octets
+      - "time-at-creation" (Unix int)     # omitted on parse failure
+      - "job-state" (str, default "pending")
+
+    Fields the CLI cannot reliably surface (job-name title, job-state-reasons,
+    document-format, …) are OMITTED — the server applies its own defaults.
+    They will appear naturally once a pycups-based backend lands.
     """
-    import time as _time
     jobs: list[dict] = []
     try:
         result = subprocess.run(
-            ["lpstat", "-W", "not-completed", "-o", printer_name],
+            ["lpstat", "-l", "-W", "not-completed", "-o", printer_name],
             capture_output=True, text=True, timeout=10, env=_c_locale_env(),
         )
     except Exception as e:
-        logger.warning("lpstat -o %s failed: %s", printer_name, e)
+        logger.warning("lpstat -l -W not-completed -o %s failed: %s", printer_name, e)
         return jobs
 
     if result.returncode != 0:
-        # Empty queue gives returncode 0 with empty stdout, so a non-zero exit
-        # is a real error (unknown printer, cupsd unreachable).
-        logger.debug("lpstat -o %s exited %d: %s",
+        # Empty queue still gives exit 0; non-zero means a real error
+        # (unknown printer, cupsd unreachable).
+        logger.debug("lpstat -l -W -o %s exited %d: %s",
                      printer_name, result.returncode, result.stderr.strip())
         return jobs
 
-    now = _time.time()
-    # Format: "<dest>-<id>  <user>  <size>  <weekday> <mon> <day> HH:MM:SS YYYY"
+    # Header line: "<queue>-<id>  <user>  <kbytes>  <weekday> <mon> <day> HH:MM:SS YYYY"
+    # With -l, indented detail lines follow each header — we skip those.
     pattern = re.compile(
         r"^(?P<jobname>\S+?)-(?P<job_id>\d+)\s+"
         r"(?P<user>\S+)\s+"
@@ -810,29 +820,24 @@ def list_jobs(printer_name: str) -> list[dict]:
         r"(?P<date>.+?)\s*$"
     )
     for line in result.stdout.splitlines():
-        line = line.rstrip()
-        if not line:
+        if not line.strip():
             continue
+        if line.startswith((" ", "\t")):
+            continue  # detail line under a previous header
         m = pattern.match(line)
         if not m:
             logger.debug("Skipping unparseable lpstat -o line: %r", line)
             continue
+        job: dict = {
+            "job-id": int(m.group("job_id")),
+            "job-originating-user-name": m.group("user"),
+            "job-k-octets": int(m.group("size")),
+            "job-state": "pending",
+        }
         epoch = _parse_lpstat_date(m.group("date"))
         if epoch is not None:
-            submitted_iso = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(epoch))
-            age = max(0, int(now - epoch))
-        else:
-            submitted_iso = ""
-            age = -1
-        jobs.append({
-            "job_id": int(m.group("job_id")),
-            "job_name": f"{m.group('jobname')}-{m.group('job_id')}",
-            "printer_name": m.group("jobname"),
-            "user": m.group("user"),
-            "size_bytes": int(m.group("size")),
-            "submitted_at": submitted_iso,
-            "age_seconds": age,
-        })
+            job["time-at-creation"] = int(epoch)
+        jobs.append(job)
 
     logger.info("Listed %d pending job(s) on '%s'", len(jobs), printer_name)
     return jobs
