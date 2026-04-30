@@ -14,8 +14,10 @@ from .ota_updater import perform_ota_update, request_restart
 from .printing import (
     add_printer,
     discover_devices,
+    get_printer_detail,
     get_printer_options,
     get_printer_status,
+    list_jobs,
     list_printers,
     remove_printer,
     set_default_printer,
@@ -33,6 +35,48 @@ def _get_local_ip() -> str:
             return s.getsockname()[0]
     except OSError:
         return ""
+
+
+def _build_printer_entry(printer_name: str) -> dict | None:
+    """Build one per-printer heartbeat dict (server-aligned schema, kebab-case
+    fields are intentionally only used inside `list_jobs` output — top-level
+    keys here are snake_case per server contract).
+
+    Returns None if any CLI call fails so the heartbeat loop can simply omit
+    the entry without crashing.
+    """
+    try:
+        detail = get_printer_detail(printer_name)
+        jobs = list_jobs(printer_name)
+        all_printers = list_printers()
+    except Exception as e:
+        logger.warning("Failed to build per-printer heartbeat for %s: %s", printer_name, e)
+        return None
+
+    summary = next((p for p in all_printers if p["name"] == printer_name), None)
+
+    oldest_age: int | None = None
+    creation_times = [j["time-at-creation"] for j in jobs if "time-at-creation" in j]
+    if creation_times:
+        oldest_age = max(0, int(time.time()) - min(creation_times))
+
+    entry: dict = {
+        "name": printer_name,
+        "state": detail["state"],
+        "state_reasons": detail["state_reasons"],
+        "accepting_jobs": detail["accepting_jobs"],
+        "cups_pending_jobs": len(jobs),
+        "oldest_job_age_seconds": oldest_age,
+        "is_default": bool(summary and summary.get("is_default")),
+    }
+    if summary:
+        # Back-compat passthrough — server keeps these visible alongside the
+        # new diagnostics so old UI surfaces don't lose info.
+        if summary.get("uri"):
+            entry["uri"] = summary["uri"]
+        if summary.get("info"):
+            entry["info"] = summary["info"]
+    return entry
 
 
 class GatewayClient:
@@ -452,11 +496,28 @@ class GatewayClient:
         await self._send(msg)
 
     async def _heartbeat_loop(self):
-        """Send periodic heartbeats."""
+        """Send periodic heartbeats.
+
+        Adds a per-printer `printers[]` array (server-aligned, forward-compatible
+        for multi-printer gateways). The legacy top-level `printer_status`
+        scalar stays for v0.4.0 server compat — server derives any aggregates
+        it needs from `printers[]`, we don't pre-compute them.
+        """
         while True:
             try:
                 printer_status = get_printer_status(self.settings.printer_name)
                 uptime = int(time.monotonic() - self._start_time)
+
+                # Per-printer enrichment runs three lpstat calls — push to a
+                # worker thread so the websocket loop stays responsive even on
+                # a slow cupsd.
+                printers: list[dict] = []
+                if self.settings.printer_name and self.settings.printer_name.strip():
+                    entry = await asyncio.to_thread(
+                        _build_printer_entry, self.settings.printer_name
+                    )
+                    if entry is not None:
+                        printers.append(entry)
 
                 await self._send({
                     "type": "heartbeat",
@@ -465,6 +526,7 @@ class GatewayClient:
                     "printer_status": printer_status,
                     "uptime": uptime,
                     "local_ip": _get_local_ip(),
+                    "printers": printers,
                     "config": {
                         "printer_name": self.settings.printer_name,
                         "dry_run": self.settings.dry_run,
@@ -472,7 +534,8 @@ class GatewayClient:
                         "heartbeat_interval": self.settings.heartbeat_interval,
                     },
                 })
-                logger.debug("Heartbeat sent (printer=%s, uptime=%ds)", printer_status, uptime)
+                logger.debug("Heartbeat sent (printer=%s, uptime=%ds, printers=%d)",
+                             printer_status, uptime, len(printers))
             except Exception as e:
                 logger.error("Heartbeat error: %s", e)
 
