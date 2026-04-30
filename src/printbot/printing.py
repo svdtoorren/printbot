@@ -759,7 +759,7 @@ def get_printer_detail(printer_name: str) -> dict:
     """Get detailed CUPS queue diagnostics for a single printer.
 
     Returns a dict with keys:
-      - state: "idle" | "printing" | "stopped" | "unknown"
+      - state: "idle" | "processing" | "stopped" | "unknown"
       - state_reasons: list[str]  (IPP-style tokens, e.g. ["cover-open"])
       - accepting_jobs: bool
       - state_message: str  (free-text, may include reason from cupsdisable -r)

@@ -48,8 +48,14 @@ def _build_printer_entry(printer_name: str) -> dict | None:
     fields are intentionally only used inside `list_jobs` output — top-level
     keys here are snake_case per server contract).
 
-    Returns None if any CLI call fails so the heartbeat loop can simply omit
-    the entry without crashing.
+    Failure semantics (be aware): the underlying `get_printer_detail`,
+    `list_jobs`, and `list_printers` helpers swallow most subprocess failures
+    and return safe defaults — empty lists, ``state="unknown"``, etc. So in a
+    cupsd-down scenario this function will normally return a dict with
+    ``state="unknown"``, empty diagnostics, and ``cups_pending_jobs=0`` rather
+    than ``None``. The server is expected to treat ``state="unknown"`` as a
+    "could not determine" signal. ``None`` is reserved for the unlikely case
+    where an exception still escapes the helpers.
     """
     try:
         detail = get_printer_detail(printer_name)
@@ -802,8 +808,11 @@ class GatewayClient:
 
         Status sequence:
           - received  : ack-only, before submit (cups_job_id not yet known)
-          - printing  : after lp returns, includes cups_job_id (job is in CUPS queue)
-          - completed : terminal success, includes cups_job_id
+          - printing  : emitted only when handle_print_job actually submitted
+                        to CUPS (the result dict carries the `cups_job_id` key,
+                        even if its value is None on parse failure). Skipped
+                        for the dedup path where no `lp` call happened.
+          - completed : terminal success
           - failed    : terminal failure (cups_job_id may be absent if submit blew up)
         """
         while True:
@@ -822,12 +831,18 @@ class GatewayClient:
                 )
 
                 cups_job_id = result.get("cups_job_id")
+                # Presence-of-key (not value) signals "submission happened".
+                # Dedup path returns {"status": "completed"} with no cups_job_id key.
+                submitted_to_cups = "cups_job_id" in result
+
                 if result["status"] == "completed":
-                    # "printing" now means "submitted, in CUPS queue", emitted with
-                    # the parsed cups_job_id so the server has a stable key from
-                    # the first message that carries it.
-                    await self._send_job_status(job_id, "printing", cups_job_id=cups_job_id)
-                    await self._send_job_status(job_id, "completed", cups_job_id=cups_job_id)
+                    if submitted_to_cups:
+                        await self._send_job_status(
+                            job_id, "printing", cups_job_id=cups_job_id
+                        )
+                    await self._send_job_status(
+                        job_id, "completed", cups_job_id=cups_job_id
+                    )
                 else:
                     await self._send_job_status(
                         job_id, result["status"],

@@ -128,8 +128,51 @@ class TestProcessJobs:
         assert by_status["completed"]["cups_job_id"] == 273
 
     @patch("printbot.websocket_client.handle_print_job")
+    async def test_dedup_path_skips_printing_event(self, mock_handle, client):
+        """Deduplicated jobs (already-printed) must NOT emit a 'printing' event.
+
+        handle_print_job's dedup branch returns {"status": "completed"} with
+        no cups_job_id key — no actual lp submission happened, so emitting
+        'printing' would mislead the server about what occurred.
+        """
+        mock_handle.return_value = {"status": "completed"}  # no cups_job_id key
+        client._ws = AsyncMock()
+
+        await client._job_queue.put({
+            "type": "print",
+            "job_id": "job-dedup",
+            "payload": "data",
+            "payload_type": "pdf",
+            "metadata": {},
+        })
+
+        task = asyncio.create_task(client._process_jobs())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        sent_msgs = [json.loads(c[0][0]) for c in client._ws.send.call_args_list]
+        statuses = [m["status"] for m in sent_msgs if "status" in m]
+        # received → completed only; no 'printing' in between.
+        assert "received" in statuses
+        assert "completed" in statuses
+        assert "printing" not in statuses
+        # cups_job_id absent from all messages — there was no submission.
+        for m in sent_msgs:
+            assert "cups_job_id" not in m
+
+    @patch("printbot.websocket_client.handle_print_job")
     async def test_cups_job_id_omitted_when_unparseable(self, mock_handle, client):
-        """If lp output couldn't be parsed, cups_job_id is omitted (not null)."""
+        """If lp output couldn't be parsed, cups_job_id is omitted (not null).
+
+        Submission DID happen (cups_job_id key present, value None) so the
+        'printing' event is still emitted — that's the signal the server uses
+        to distinguish "submitted but id-unknown" from "deduplicated, never
+        submitted".
+        """
         mock_handle.return_value = {"status": "completed", "cups_job_id": None}
         client._ws = AsyncMock()
 
