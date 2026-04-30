@@ -139,6 +139,243 @@ class TestDiscoverDevices:
         assert response_msgs[0]["error"] is not None
 
 
+class TestCupsResumePrinter:
+    """One-click recovery — cupsenable + cupsaccept on a stopped queue."""
+
+    @patch("printbot.websocket_client.accept_jobs")
+    @patch("printbot.websocket_client.enable_printer")
+    async def test_success(self, mock_enable, mock_accept, client):
+        await client._handle_cups_resume_printer({
+            "request_id": "req-resume",
+            "printer_name": "hp",
+        })
+        mock_enable.assert_called_once_with("hp")
+        mock_accept.assert_called_once_with("hp")
+
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["type"] == "cups_response"
+        assert sent["request_id"] == "req-resume"
+        assert sent["success"] is True
+        assert sent["error"] is None
+
+    @patch("printbot.websocket_client.accept_jobs")
+    @patch("printbot.websocket_client.enable_printer", side_effect=RuntimeError("Not authorized"))
+    async def test_enable_failure_short_circuits(self, mock_enable, mock_accept, client):
+        await client._handle_cups_resume_printer({
+            "request_id": "req-resume-fail",
+            "printer_name": "hp",
+        })
+        # accept_jobs must not run if enable failed.
+        mock_accept.assert_not_called()
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+        assert "Not authorized" in sent["error"]
+
+
+class TestCupsEnablePrinter:
+    @patch("printbot.websocket_client.enable_printer")
+    async def test_success(self, mock_enable, client):
+        await client._handle_cups_enable_printer({
+            "request_id": "req-en", "printer_name": "hp",
+        })
+        mock_enable.assert_called_once_with("hp")
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+    @patch("printbot.websocket_client.enable_printer", side_effect=RuntimeError("cupsd down"))
+    async def test_failure(self, mock_enable, client):
+        await client._handle_cups_enable_printer({
+            "request_id": "req-en-fail", "printer_name": "hp",
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+        assert "cupsd down" in sent["error"]
+
+
+class TestCupsDisablePrinter:
+    @patch("printbot.websocket_client.disable_printer")
+    async def test_success_with_reason(self, mock_disable, client):
+        await client._handle_cups_disable_printer({
+            "request_id": "req-dis",
+            "printer_name": "hp",
+            "reason": "maintenance",
+        })
+        mock_disable.assert_called_once_with("hp", "maintenance")
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+    @patch("printbot.websocket_client.disable_printer")
+    async def test_success_no_reason(self, mock_disable, client):
+        await client._handle_cups_disable_printer({
+            "request_id": "req-dis-nor", "printer_name": "hp",
+        })
+        # Empty reason still passes through; printing.disable_printer skips -r when empty.
+        mock_disable.assert_called_once_with("hp", "")
+
+    @patch("printbot.websocket_client.disable_printer", side_effect=RuntimeError("not allowed"))
+    async def test_failure(self, mock_disable, client):
+        await client._handle_cups_disable_printer({
+            "request_id": "req-dis-fail", "printer_name": "hp",
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+
+
+class TestCupsAcceptJobs:
+    @patch("printbot.websocket_client.accept_jobs")
+    async def test_success(self, mock_accept, client):
+        await client._handle_cups_accept_jobs({
+            "request_id": "req-acc", "printer_name": "hp",
+        })
+        mock_accept.assert_called_once_with("hp")
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+
+class TestCupsRejectJobs:
+    @patch("printbot.websocket_client.reject_jobs")
+    async def test_success_with_reason(self, mock_reject, client):
+        await client._handle_cups_reject_jobs({
+            "request_id": "req-rej",
+            "printer_name": "hp",
+            "reason": "paper out",
+        })
+        mock_reject.assert_called_once_with("hp", "paper out")
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+
+class TestCupsListJobs:
+    @patch("printbot.websocket_client.list_jobs")
+    async def test_returns_jobs_under_jobs_key(self, mock_list, client):
+        # Server contract: data shape is {"jobs": [...]}.
+        mock_list.return_value = [
+            {
+                "job-id": 42,
+                "job-originating-user-name": "alice",
+                "job-k-octets": 24,
+                "time-at-creation": 1745683200,
+                "job-state": "pending",
+            }
+        ]
+        await client._handle_cups_list_jobs({
+            "request_id": "req-lj", "printer_name": "hp",
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+        assert sent["data"] == {"jobs": [
+            {
+                "job-id": 42,
+                "job-originating-user-name": "alice",
+                "job-k-octets": 24,
+                "time-at-creation": 1745683200,
+                "job-state": "pending",
+            }
+        ]}
+
+    @patch("printbot.websocket_client.list_jobs")
+    async def test_empty_queue_returns_empty_list(self, mock_list, client):
+        mock_list.return_value = []
+        await client._handle_cups_list_jobs({
+            "request_id": "req-lj-empty", "printer_name": "hp",
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+        assert sent["data"] == {"jobs": []}
+
+    @patch("printbot.websocket_client.list_jobs", side_effect=RuntimeError("no such printer"))
+    async def test_failure(self, mock_list, client):
+        await client._handle_cups_list_jobs({
+            "request_id": "req-lj-fail", "printer_name": "ghost",
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+        assert "no such printer" in sent["error"]
+
+
+class TestCupsCancelJob:
+    @patch("printbot.websocket_client.cancel_job")
+    async def test_success_int_id(self, mock_cancel, client):
+        await client._handle_cups_cancel_job({
+            "request_id": "req-cnc", "job_id": 42,
+        })
+        mock_cancel.assert_called_once_with(42, False)
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+    @patch("printbot.websocket_client.cancel_job")
+    async def test_success_namespaced_id_with_purge(self, mock_cancel, client):
+        await client._handle_cups_cancel_job({
+            "request_id": "req-cnc-purge",
+            "job_id": "hp-42",
+            "purge": True,
+        })
+        mock_cancel.assert_called_once_with("hp-42", True)
+
+    @patch("printbot.websocket_client.cancel_job")
+    async def test_missing_job_id_fails(self, mock_cancel, client):
+        # Idempotency rule: surfaces a clear error rather than silently no-op.
+        await client._handle_cups_cancel_job({"request_id": "req-cnc-noid"})
+        mock_cancel.assert_not_called()
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+        assert "job_id is required" in sent["error"]
+
+    @patch("printbot.websocket_client.cancel_job", side_effect=RuntimeError("job not found"))
+    async def test_already_cancelled_returns_failure(self, mock_cancel, client):
+        # Server-spec idempotency: cancel on already-canceled/completed job
+        # surfaces "job not found" via success=False.
+        await client._handle_cups_cancel_job({
+            "request_id": "req-cnc-gone", "job_id": 999,
+        })
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is False
+        assert "job not found" in sent["error"]
+
+
+class TestCupsClearQueue:
+    @patch("printbot.websocket_client.clear_queue")
+    async def test_success(self, mock_clear, client):
+        await client._handle_cups_clear_queue({
+            "request_id": "req-clr", "printer_name": "hp",
+        })
+        mock_clear.assert_called_once_with("hp", False)
+        sent = json.loads(client._ws.send.call_args[0][0])
+        assert sent["success"] is True
+
+    @patch("printbot.websocket_client.clear_queue")
+    async def test_purge(self, mock_clear, client):
+        await client._handle_cups_clear_queue({
+            "request_id": "req-clr-p", "printer_name": "hp", "purge": True,
+        })
+        mock_clear.assert_called_once_with("hp", True)
+
+
+class TestCupsControlDispatchInHandleMessage:
+    """Smoke-test that _handle_message routes the new types to their handlers."""
+
+    @patch("printbot.websocket_client.GatewayClient._handle_cups_resume_printer", new_callable=AsyncMock)
+    async def test_resume_routed(self, mock_handler, client):
+        msg = {"type": "cups_resume_printer", "request_id": "r", "printer_name": "hp"}
+        await client._handle_message(msg)
+        await asyncio.sleep(0)  # let create_task fire
+        mock_handler.assert_called_once()
+
+    @patch("printbot.websocket_client.GatewayClient._handle_cups_list_jobs", new_callable=AsyncMock)
+    async def test_list_jobs_routed(self, mock_handler, client):
+        msg = {"type": "cups_list_jobs", "request_id": "r", "printer_name": "hp"}
+        await client._handle_message(msg)
+        await asyncio.sleep(0)
+        mock_handler.assert_called_once()
+
+    @patch("printbot.websocket_client.GatewayClient._handle_cups_cancel_job", new_callable=AsyncMock)
+    async def test_cancel_job_routed(self, mock_handler, client):
+        msg = {"type": "cups_cancel_job", "request_id": "r", "job_id": 42}
+        await client._handle_message(msg)
+        await asyncio.sleep(0)
+        mock_handler.assert_called_once()
+
+
 class TestOtaStatusProgression:
     @patch("printbot.websocket_client.request_restart")
     @patch("printbot.websocket_client.perform_ota_update")
