@@ -12,11 +12,19 @@ from .config import Settings
 from .job_handler import handle_print_job
 from .ota_updater import perform_ota_update, request_restart
 from .printing import (
+    accept_jobs,
     add_printer,
+    cancel_job,
+    clear_queue,
+    disable_printer,
     discover_devices,
+    enable_printer,
+    get_printer_detail,
     get_printer_options,
     get_printer_status,
+    list_jobs,
     list_printers,
+    reject_jobs,
     remove_printer,
     set_default_printer,
     set_printer_options,
@@ -33,6 +41,54 @@ def _get_local_ip() -> str:
             return s.getsockname()[0]
     except OSError:
         return ""
+
+
+def _build_printer_entry(printer_name: str) -> dict | None:
+    """Build one per-printer heartbeat dict (server-aligned schema, kebab-case
+    fields are intentionally only used inside `list_jobs` output — top-level
+    keys here are snake_case per server contract).
+
+    Failure semantics (be aware): the underlying `get_printer_detail`,
+    `list_jobs`, and `list_printers` helpers swallow most subprocess failures
+    and return safe defaults — empty lists, ``state="unknown"``, etc. So in a
+    cupsd-down scenario this function will normally return a dict with
+    ``state="unknown"``, empty diagnostics, and ``cups_pending_jobs=0`` rather
+    than ``None``. The server is expected to treat ``state="unknown"`` as a
+    "could not determine" signal. ``None`` is reserved for the unlikely case
+    where an exception still escapes the helpers.
+    """
+    try:
+        detail = get_printer_detail(printer_name)
+        jobs = list_jobs(printer_name)
+        all_printers = list_printers()
+    except Exception as e:
+        logger.warning("Failed to build per-printer heartbeat for %s: %s", printer_name, e)
+        return None
+
+    summary = next((p for p in all_printers if p["name"] == printer_name), None)
+
+    oldest_age: int | None = None
+    creation_times = [j["time-at-creation"] for j in jobs if "time-at-creation" in j]
+    if creation_times:
+        oldest_age = max(0, int(time.time()) - min(creation_times))
+
+    entry: dict = {
+        "name": printer_name,
+        "state": detail["state"],
+        "state_reasons": detail["state_reasons"],
+        "accepting_jobs": detail["accepting_jobs"],
+        "cups_pending_jobs": len(jobs),
+        "oldest_job_age_seconds": oldest_age,
+        "is_default": bool(summary and summary.get("is_default")),
+    }
+    if summary:
+        # Back-compat passthrough — server keeps these visible alongside the
+        # new diagnostics so old UI surfaces don't lose info.
+        if summary.get("uri"):
+            entry["uri"] = summary["uri"]
+        if summary.get("info"):
+            entry["info"] = summary["info"]
+    return entry
 
 
 class GatewayClient:
@@ -139,6 +195,31 @@ class GatewayClient:
 
         elif msg_type == "cups_set_printer_options":
             asyncio.create_task(self._handle_cups_set_printer_options(msg))
+
+        # --- queue control (PR3) -------------------------------------------
+        elif msg_type == "cups_resume_printer":
+            asyncio.create_task(self._handle_cups_resume_printer(msg))
+
+        elif msg_type == "cups_enable_printer":
+            asyncio.create_task(self._handle_cups_enable_printer(msg))
+
+        elif msg_type == "cups_disable_printer":
+            asyncio.create_task(self._handle_cups_disable_printer(msg))
+
+        elif msg_type == "cups_accept_jobs":
+            asyncio.create_task(self._handle_cups_accept_jobs(msg))
+
+        elif msg_type == "cups_reject_jobs":
+            asyncio.create_task(self._handle_cups_reject_jobs(msg))
+
+        elif msg_type == "cups_list_jobs":
+            asyncio.create_task(self._handle_cups_list_jobs(msg))
+
+        elif msg_type == "cups_cancel_job":
+            asyncio.create_task(self._handle_cups_cancel_job(msg))
+
+        elif msg_type == "cups_clear_queue":
+            asyncio.create_task(self._handle_cups_clear_queue(msg))
 
         elif msg_type == "ota_update":
             url = msg.get("url", "")
@@ -369,6 +450,231 @@ class GatewayClient:
                 "error": str(e),
             })
 
+    # --- queue control handlers (PR3) ---------------------------------------
+    # All use the existing cups_response envelope + request_id correlation.
+    # CUPS makes the resume/enable/disable/accept/reject/clear paths naturally
+    # idempotent (running them on already-in-target-state queues exits 0); we
+    # don't add extra handling. cancel_job on a missing/completed id surfaces
+    # CUPS's own error to the server via success=False.
+
+    async def _handle_cups_resume_printer(self, msg: dict):
+        """One-click recovery: cupsenable + cupsaccept. Matches the workaround
+        from the original incident where re-adding the printer was the only fix."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_resume_printer request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            await asyncio.to_thread(enable_printer, printer_name)
+            await asyncio.to_thread(accept_jobs, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_resume_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_enable_printer(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_enable_printer request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            await asyncio.to_thread(enable_printer, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_enable_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_disable_printer(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        reason = msg.get("reason", "") or ""
+        logger.info(
+            "cups_disable_printer request (request_id=%s, name=%s, reason=%r)",
+            request_id, printer_name, reason,
+        )
+        try:
+            await asyncio.to_thread(disable_printer, printer_name, reason)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_disable_printer failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_accept_jobs(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_accept_jobs request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            await asyncio.to_thread(accept_jobs, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_accept_jobs failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_reject_jobs(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        reason = msg.get("reason", "") or ""
+        logger.info(
+            "cups_reject_jobs request (request_id=%s, name=%s, reason=%r)",
+            request_id, printer_name, reason,
+        )
+        try:
+            await asyncio.to_thread(reject_jobs, printer_name, reason)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_reject_jobs failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_list_jobs(self, msg: dict):
+        """Response data shape: {"jobs": [<IPP-attribute kebab-case dicts>]}."""
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        logger.info(
+            "cups_list_jobs request (request_id=%s, name=%s)",
+            request_id, printer_name,
+        )
+        try:
+            jobs = await asyncio.to_thread(list_jobs, printer_name)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": {"jobs": jobs},
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_list_jobs failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_cancel_job(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        job_id = msg.get("job_id")
+        purge = bool(msg.get("purge", False))
+        logger.info(
+            "cups_cancel_job request (request_id=%s, job_id=%s, purge=%s)",
+            request_id, job_id, purge,
+        )
+        try:
+            if job_id is None or job_id == "":
+                raise RuntimeError("job_id is required")
+            await asyncio.to_thread(cancel_job, job_id, purge)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_cancel_job failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
+    async def _handle_cups_clear_queue(self, msg: dict):
+        request_id = msg.get("request_id", "")
+        printer_name = msg.get("printer_name", "")
+        purge = bool(msg.get("purge", False))
+        logger.info(
+            "cups_clear_queue request (request_id=%s, name=%s, purge=%s)",
+            request_id, printer_name, purge,
+        )
+        try:
+            await asyncio.to_thread(clear_queue, printer_name, purge)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": True,
+                "data": None,
+                "error": None,
+            })
+        except Exception as e:
+            logger.exception("cups_clear_queue failed: %s", e)
+            await self._send({
+                "type": "cups_response",
+                "request_id": request_id,
+                "success": False,
+                "data": None,
+                "error": str(e),
+            })
+
     async def _handle_config_update(self, msg: dict):
         """Apply remote config changes, persist to .env, and send response."""
         applied = {}
@@ -452,11 +758,28 @@ class GatewayClient:
         await self._send(msg)
 
     async def _heartbeat_loop(self):
-        """Send periodic heartbeats."""
+        """Send periodic heartbeats.
+
+        Adds a per-printer `printers[]` array (server-aligned, forward-compatible
+        for multi-printer gateways). The legacy top-level `printer_status`
+        scalar stays for v0.4.0 server compat — server derives any aggregates
+        it needs from `printers[]`, we don't pre-compute them.
+        """
         while True:
             try:
                 printer_status = get_printer_status(self.settings.printer_name)
                 uptime = int(time.monotonic() - self._start_time)
+
+                # Per-printer enrichment runs three lpstat calls — push to a
+                # worker thread so the websocket loop stays responsive even on
+                # a slow cupsd.
+                printers: list[dict] = []
+                if self.settings.printer_name and self.settings.printer_name.strip():
+                    entry = await asyncio.to_thread(
+                        _build_printer_entry, self.settings.printer_name
+                    )
+                    if entry is not None:
+                        printers.append(entry)
 
                 await self._send({
                     "type": "heartbeat",
@@ -465,6 +788,7 @@ class GatewayClient:
                     "printer_status": printer_status,
                     "uptime": uptime,
                     "local_ip": _get_local_ip(),
+                    "printers": printers,
                     "config": {
                         "printer_name": self.settings.printer_name,
                         "dry_run": self.settings.dry_run,
@@ -472,24 +796,32 @@ class GatewayClient:
                         "heartbeat_interval": self.settings.heartbeat_interval,
                     },
                 })
-                logger.debug("Heartbeat sent (printer=%s, uptime=%ds)", printer_status, uptime)
+                logger.debug("Heartbeat sent (printer=%s, uptime=%ds, printers=%d)",
+                             printer_status, uptime, len(printers))
             except Exception as e:
                 logger.error("Heartbeat error: %s", e)
 
             await asyncio.sleep(self.settings.heartbeat_interval)
 
     async def _process_jobs(self):
-        """Process print jobs from queue sequentially."""
+        """Process print jobs from queue sequentially.
+
+        Status sequence:
+          - received  : ack-only, before submit (cups_job_id not yet known)
+          - printing  : emitted only when handle_print_job actually submitted
+                        to CUPS (the result dict carries the `cups_job_id` key,
+                        even if its value is None on parse failure). Skipped
+                        for the dedup path where no `lp` call happened.
+          - completed : terminal success
+          - failed    : terminal failure (cups_job_id may be absent if submit blew up)
+        """
         while True:
             msg = await self._job_queue.get()
             job_id = msg.get("job_id", "unknown")
 
             try:
-                # Acknowledge receipt
                 await self._send_job_status(job_id, "received")
 
-                # Process the job
-                await self._send_job_status(job_id, "printing")
                 result = await asyncio.to_thread(
                     handle_print_job,
                     msg,
@@ -498,19 +830,45 @@ class GatewayClient:
                     self.settings.dry_run,
                 )
 
-                await self._send_job_status(job_id, result["status"], result.get("error"))
+                cups_job_id = result.get("cups_job_id")
+                # Presence-of-key (not value) signals "submission happened".
+                # Dedup path returns {"status": "completed"} with no cups_job_id key.
+                submitted_to_cups = "cups_job_id" in result
+
+                if result["status"] == "completed":
+                    if submitted_to_cups:
+                        await self._send_job_status(
+                            job_id, "printing", cups_job_id=cups_job_id
+                        )
+                    await self._send_job_status(
+                        job_id, "completed", cups_job_id=cups_job_id
+                    )
+                else:
+                    await self._send_job_status(
+                        job_id, result["status"],
+                        error=result.get("error"),
+                        cups_job_id=cups_job_id,
+                    )
 
             except Exception as e:
                 logger.exception("Job %s failed: %s", job_id, e)
-                await self._send_job_status(job_id, "failed", str(e))
+                await self._send_job_status(job_id, "failed", error=str(e))
 
             self._job_queue.task_done()
 
-    async def _send_job_status(self, job_id: str, status: str, error: str | None = None):
+    async def _send_job_status(
+        self,
+        job_id: str,
+        status: str,
+        error: str | None = None,
+        cups_job_id: int | None = None,
+    ):
         """Send job status update to server."""
-        msg = {"type": "job_status", "job_id": job_id, "status": status}
+        msg: dict = {"type": "job_status", "job_id": job_id, "status": status}
         if error:
             msg["error"] = error
+        if cups_job_id is not None:
+            msg["cups_job_id"] = cups_job_id
         await self._send(msg)
 
     async def _send(self, msg: dict):

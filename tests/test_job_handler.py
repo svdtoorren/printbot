@@ -38,13 +38,34 @@ class TestJobHandler(unittest.TestCase):
 
     @patch("printbot.job_handler.print_pdf")
     def test_successful_print(self, mock_print):
+        mock_print.return_value = 142
         job = self._make_job()
         result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
 
         self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["cups_job_id"], 142)
         mock_print.assert_called_once()
         call_kwargs = mock_print.call_args
         self.assertEqual(call_kwargs.kwargs.get("copies") or call_kwargs[1].get("copies", 1), 1)
+
+    @patch("printbot.job_handler.print_pdf")
+    def test_successful_print_without_parseable_id(self, mock_print):
+        # If lp output couldn't be parsed, cups_job_id is None — propagated as-is.
+        mock_print.return_value = None
+        job = self._make_job(job_id="no-id-001")
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNone(result["cups_job_id"])
+
+    @patch("printbot.job_handler.print_raw")
+    def test_raw_print_propagates_cups_job_id(self, mock_print_raw):
+        mock_print_raw.return_value = 55
+        job = self._make_job(job_id="raw-001", payload_type="raw")
+        result = handle_print_job(job, self.printer_name, self.state_dir, dry_run=False)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["cups_job_id"], 55)
 
     @patch("printbot.job_handler.print_pdf")
     def test_deduplication(self, mock_print):

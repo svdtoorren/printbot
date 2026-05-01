@@ -5,7 +5,22 @@ import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-from printbot.printing import print_pdf, get_printer_status
+from printbot.printing import (
+    accept_jobs,
+    cancel_job,
+    clear_queue,
+    disable_printer,
+    enable_printer,
+    get_printer_detail,
+    get_printer_status,
+    list_jobs,
+    print_pdf,
+    print_raw,
+    reject_jobs,
+    _extract_reasons,
+    _parse_lp_request_id,
+    _parse_state_line,
+)
 
 
 class TestPrintPdf(unittest.TestCase):
@@ -63,6 +78,416 @@ class TestGetPrinterStatus(unittest.TestCase):
     @patch("printbot.printing.subprocess.run", side_effect=Exception("no lpstat"))
     def test_error_returns_unknown(self, mock_run):
         self.assertEqual(get_printer_status("test-printer"), "unknown")
+
+
+class TestQueueAdminCommands(unittest.TestCase):
+    """Wrappers around cupsenable/cupsdisable/cupsaccept/cupsreject/cancel."""
+
+    def _ok(self):
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    def _fail(self, msg="boom"):
+        return MagicMock(returncode=1, stdout="", stderr=msg)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_enable_printer_invokes_cupsenable(self, mock_run):
+        mock_run.return_value = self._ok()
+        enable_printer("hp")
+        self.assertEqual(mock_run.call_args[0][0], ["cupsenable", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_enable_printer_raises_on_failure(self, mock_run):
+        mock_run.return_value = self._fail("lpadmin: Not authorized")
+        with self.assertRaises(RuntimeError) as ctx:
+            enable_printer("hp")
+        self.assertIn("Not authorized", str(ctx.exception))
+
+    @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_no_reason(self, mock_run):
+        mock_run.return_value = self._ok()
+        disable_printer("hp")
+        self.assertEqual(mock_run.call_args[0][0], ["cupsdisable", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_with_reason(self, mock_run):
+        mock_run.return_value = self._ok()
+        disable_printer("hp", reason="maintenance")
+        self.assertEqual(mock_run.call_args[0][0], ["cupsdisable", "-r", "maintenance", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_long_reason_clipped_to_255(self, mock_run):
+        mock_run.return_value = self._ok()
+        disable_printer("hp", reason="a" * 1000)
+        sent = mock_run.call_args[0][0]
+        idx = sent.index("-r")
+        self.assertEqual(len(sent[idx + 1]), 255)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_disable_printer_non_latin1_replaced(self, mock_run):
+        mock_run.return_value = self._ok()
+        # Emoji + cyrillic — neither fits in latin-1, must become "?".
+        disable_printer("hp", reason="boom \U0001f525 Я")
+        sent = mock_run.call_args[0][0]
+        reason = sent[sent.index("-r") + 1]
+        self.assertNotIn("\U0001f525", reason)
+        self.assertNotIn("Я", reason)
+        self.assertIn("?", reason)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_accept_jobs(self, mock_run):
+        mock_run.return_value = self._ok()
+        accept_jobs("hp")
+        self.assertEqual(mock_run.call_args[0][0], ["cupsaccept", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_reject_jobs_with_reason(self, mock_run):
+        mock_run.return_value = self._ok()
+        reject_jobs("hp", reason="paper out")
+        self.assertEqual(mock_run.call_args[0][0], ["cupsreject", "-r", "paper out", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_cancel_job_numeric(self, mock_run):
+        mock_run.return_value = self._ok()
+        cancel_job(42)
+        self.assertEqual(mock_run.call_args[0][0], ["cancel", "42"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_cancel_job_namespaced_with_purge(self, mock_run):
+        mock_run.return_value = self._ok()
+        cancel_job("hp-42", purge=True)
+        self.assertEqual(mock_run.call_args[0][0], ["cancel", "-x", "hp-42"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_clear_queue(self, mock_run):
+        mock_run.return_value = self._ok()
+        clear_queue("hp")
+        self.assertEqual(mock_run.call_args[0][0], ["cancel", "-a", "hp"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_clear_queue_purge(self, mock_run):
+        mock_run.return_value = self._ok()
+        clear_queue("hp", purge=True)
+        self.assertEqual(mock_run.call_args[0][0], ["cancel", "-a", "-x", "hp"])
+
+    @patch("printbot.printing.subprocess.run", side_effect=FileNotFoundError())
+    def test_missing_binary_raises(self, _mock_run):
+        with self.assertRaises(RuntimeError) as ctx:
+            enable_printer("hp")
+        self.assertIn("not found", str(ctx.exception))
+
+
+class TestParseStateLine(unittest.TestCase):
+    def test_idle(self):
+        state, summary = _parse_state_line("printer hp is idle.  enabled since Mon Apr 24 10:00:00 2026")
+        self.assertEqual(state, "idle")
+        self.assertIn("idle", summary)
+
+    def test_processing(self):
+        # Server-aligned enum: "processing", not "printing".
+        state, _ = _parse_state_line("printer hp now printing hp-42.  enabled since Mon Apr 24 10:00:00 2026")
+        self.assertEqual(state, "processing")
+
+    def test_disabled_means_stopped(self):
+        state, _ = _parse_state_line("printer hp disabled since Mon Apr 24 10:00:00 2026 -")
+        self.assertEqual(state, "stopped")
+
+    def test_unrecognized(self):
+        state, _ = _parse_state_line("garbage line")
+        self.assertEqual(state, "unknown")
+
+
+class TestExtractReasons(unittest.TestCase):
+    def test_alerts_line(self):
+        blob = "\tAlerts: cover-open, marker-supply-low-warning\n"
+        reasons = _extract_reasons(blob)
+        self.assertIn("cover-open", reasons)
+        self.assertIn("marker-supply-low-warning", reasons)
+
+    def test_reasons_label(self):
+        blob = "\treasons: media-empty\n"
+        self.assertIn("media-empty", _extract_reasons(blob))
+
+    def test_keyword_in_message(self):
+        blob = "Drum end of life — please replace; marker-supply-empty"
+        self.assertIn("marker-supply-empty", _extract_reasons(blob))
+
+    def test_none_filtered(self):
+        blob = "\tAlerts: none\n"
+        self.assertEqual(_extract_reasons(blob), [])
+
+    def test_dedup(self):
+        blob = "\tAlerts: cover-open, cover-open\n"
+        self.assertEqual(_extract_reasons(blob).count("cover-open"), 1)
+
+
+class TestGetPrinterDetail(unittest.TestCase):
+    def _mock_lpstat(self, lp_l_p_stdout: str, lp_a_stdout: str):
+        """Return a side_effect that returns different MagicMocks per call."""
+        results = [
+            MagicMock(returncode=0, stdout=lp_l_p_stdout, stderr=""),
+            MagicMock(returncode=0, stdout=lp_a_stdout, stderr=""),
+        ]
+        return results
+
+    @patch("printbot.printing.subprocess.run")
+    def test_idle_accepting(self, mock_run):
+        mock_run.side_effect = self._mock_lpstat(
+            "printer hp is idle.  enabled since Mon Apr 24 10:00:00 2026\n"
+            "\tDescription: HP\n"
+            "\tLocation: Office\n",
+            "hp accepting requests since Mon Apr 24 10:00:00 2026\n",
+        )
+        d = get_printer_detail("hp")
+        self.assertEqual(d["state"], "idle")
+        self.assertTrue(d["accepting_jobs"])
+        self.assertEqual(d["state_reasons"], [])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_stopped_with_reason(self, mock_run):
+        mock_run.side_effect = self._mock_lpstat(
+            "printer hp disabled since Mon Apr 24 10:00:00 2026 -\n"
+            "\tDrum end of life — marker-supply-empty\n"
+            "\tDescription: HP\n",
+            "hp accepting requests since Mon Apr 24 10:00:00 2026\n",
+        )
+        d = get_printer_detail("hp")
+        self.assertEqual(d["state"], "stopped")
+        self.assertIn("marker-supply-empty", d["state_reasons"])
+        self.assertIn("Drum end of life", d["state_message"])
+        self.assertTrue(d["accepting_jobs"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_not_accepting_jobs(self, mock_run):
+        mock_run.side_effect = self._mock_lpstat(
+            "printer hp is idle.  enabled since Mon Apr 24 10:00:00 2026\n",
+            "hp not accepting requests since Mon Apr 24 10:00:00 2026 -\n\tmaintenance window\n",
+        )
+        d = get_printer_detail("hp")
+        self.assertFalse(d["accepting_jobs"])
+
+    @patch("printbot.printing.subprocess.run", side_effect=Exception("no lpstat"))
+    def test_lpstat_failure_returns_defaults(self, _mock_run):
+        d = get_printer_detail("hp")
+        self.assertEqual(d["state"], "unknown")
+        self.assertEqual(d["state_reasons"], [])
+        self.assertFalse(d["accepting_jobs"])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_alerts_line_parsed(self, mock_run):
+        mock_run.side_effect = self._mock_lpstat(
+            "printer hp is idle.  enabled since Mon Apr 24 10:00:00 2026\n"
+            "\tAlerts: cover-open, media-low\n",
+            "hp accepting requests since Mon Apr 24 10:00:00 2026\n",
+        )
+        d = get_printer_detail("hp")
+        self.assertIn("cover-open", d["state_reasons"])
+        self.assertIn("media-low", d["state_reasons"])
+
+
+class TestListJobs(unittest.TestCase):
+    """Server-aligned IPP-attribute kebab-case schema."""
+
+    @patch("printbot.printing.subprocess.run")
+    def test_empty_queue(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        self.assertEqual(list_jobs("hp"), [])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_lpstat_failure_returns_empty(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="not found")
+        self.assertEqual(list_jobs("hp"), [])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_parses_single_job(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n",
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual(job["job-id"], 42)
+        self.assertEqual(job["job-originating-user-name"], "alice")
+        self.assertEqual(job["job-k-octets"], 12345)
+        self.assertEqual(job["job-state"], "pending")
+        self.assertIn("time-at-creation", job)
+        self.assertIsInstance(job["time-at-creation"], int)
+        # Server fallback `(untitled)` requires us to OMIT (not null) job-name.
+        self.assertNotIn("job-name", job)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_parses_multiple_jobs_preserves_order(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n"
+                "hp-43                 bob            54321   Mon Jan  6 10:01:00 2020\n"
+                "hp-44                 carol          999     Mon Jan  6 10:02:00 2020\n"
+            ),
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual([j["job-id"] for j in jobs], [42, 43, 44])
+        self.assertEqual(
+            [j["job-originating-user-name"] for j in jobs],
+            ["alice", "bob", "carol"],
+        )
+
+    @patch("printbot.printing.subprocess.run")
+    def test_handles_namespaced_printer(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="my-printer-99         alice          100     Mon Jan  6 10:00:00 2020\n",
+            stderr="",
+        )
+        jobs = list_jobs("my-printer")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job-id"], 99)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_skips_indented_detail_lines(self, mock_run):
+        # `lpstat -l` adds indented "queued for hp" / size= / etc lines under
+        # each header — we must not try to parse those as new jobs.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n"
+                "        queued for hp\n"
+                "        size=12345\n"
+                "hp-43                 bob            999     Mon Jan  6 10:01:00 2020\n"
+                "\tAlerts:\n"
+            ),
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual([j["job-id"] for j in jobs], [42, 43])
+
+    @patch("printbot.printing.subprocess.run")
+    def test_skips_unparseable_lines(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=(
+                "garbage line that doesnt match\n"
+                "hp-42                 alice          12345   Mon Jan  6 10:00:00 2020\n"
+            ),
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["job-id"], 42)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_unparseable_date_omits_creation_time(self, mock_run):
+        # Per server contract: fields the CLI cannot deliver are OMITTED, not null.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="hp-42                 alice          12345   not-a-date-at-all\n",
+            stderr="",
+        )
+        jobs = list_jobs("hp")
+        self.assertEqual(len(jobs), 1)
+        self.assertNotIn("time-at-creation", jobs[0])
+        # Other fields still present.
+        self.assertEqual(jobs[0]["job-id"], 42)
+
+
+class TestParseLpRequestId(unittest.TestCase):
+    """Parse the CUPS job-id out of `lp` stdout (print-verification fase 0)."""
+
+    def test_standard_output(self):
+        self.assertEqual(
+            _parse_lp_request_id("request id is HP-Printer-142 (1 file(s))\n"),
+            142,
+        )
+
+    def test_simple_queue_name(self):
+        self.assertEqual(
+            _parse_lp_request_id("request id is hp-7 (1 file(s))"),
+            7,
+        )
+
+    def test_queue_name_with_multiple_dashes(self):
+        # The id is always the trailing integer; queue name may contain dashes.
+        self.assertEqual(
+            _parse_lp_request_id("request id is brother-laser-mfc-9000-99 (1 file(s))"),
+            99,
+        )
+
+    def test_empty_stdout(self):
+        self.assertIsNone(_parse_lp_request_id(""))
+        self.assertIsNone(_parse_lp_request_id(None))  # type: ignore[arg-type]
+
+    def test_unrelated_stdout(self):
+        self.assertIsNone(_parse_lp_request_id("warning: printer offline"))
+
+
+class TestPrintPdfReturnsCupsJobId(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.pdf_path = tempfile.mkstemp(prefix="test_", suffix=".pdf")
+        with os.fdopen(self.fd, "wb") as f:
+            f.write(b"%PDF-1.0 test")
+
+    def tearDown(self):
+        try:
+            os.remove(self.pdf_path)
+        except OSError:
+            pass
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_parsed_id(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="request id is hp-273 (1 file(s))\n",
+            stderr="",
+        )
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        self.assertEqual(result, 273)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_none_on_unparseable_output(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0, stdout="weird output", stderr="")
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        self.assertIsNone(result)
+
+    def test_dry_run_returns_none(self):
+        result = print_pdf("hp", "Title", self.pdf_path, cleanup=False, dry_run=True)
+        self.assertIsNone(result)
+
+    @patch("printbot.printing.subprocess.run")
+    def test_lp_invoked_under_c_locale(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="request id is hp-1 (1 file(s))", stderr="",
+        )
+        print_pdf("hp", "Title", self.pdf_path, cleanup=False)
+        # env kwarg must include LC_ALL=C so the regex stays stable across hosts.
+        env = mock_run.call_args.kwargs.get("env", {})
+        self.assertEqual(env.get("LC_ALL"), "C")
+
+
+class TestPrintRawReturnsCupsJobId(unittest.TestCase):
+    def setUp(self):
+        self.fd, self.raw_path = tempfile.mkstemp(prefix="test_", suffix=".prn")
+        with os.fdopen(self.fd, "wb") as f:
+            f.write(b"raw data")
+
+    def tearDown(self):
+        try:
+            os.remove(self.raw_path)
+        except OSError:
+            pass
+
+    @patch("printbot.printing.subprocess.run")
+    def test_returns_parsed_id(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="request id is label-55 (1 file(s))", stderr="",
+        )
+        result = print_raw("label", "Title", self.raw_path, cleanup=False)
+        self.assertEqual(result, 55)
+
+    def test_dry_run_returns_none(self):
+        result = print_raw("label", "Title", self.raw_path, cleanup=False, dry_run=True)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
